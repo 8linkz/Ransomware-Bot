@@ -1,0 +1,14 @@
+{
+  "show_unicode_flags": true,
+  "field_order": [
+    "victim",
+    "activity",
+    "country",
+    "website",
+    "group",
+    "discovered",
+    "attackdate",
+    "description",
+    "post_url"
+  ]
+}
