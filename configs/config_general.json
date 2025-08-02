@@ -1,0 +1,30 @@
+{
+    "log_level": "INFO",
+    "log_rotation": {
+        "max_size_mb": 10,
+        "max_backups": 5,
+        "max_age_days": 7,
+        "compress": true
+    },
+    "api_key": "YOUR RASNSOMWARE.LIVE API KEY HERE",
+    "api_poll_interval": "1h",
+    "api_start_time": "",
+    "rss_poll_interval": "30m",
+    "rss_retry_count": 3,
+    "rss_retry_delay": "2s",
+    "discord_delay": "2s",
+    "webhooks": {
+        "ransomware": {
+            "enabled": true,
+            "url": "YOUR DISCORD WEBHOOK URL HERE"
+        },
+        "rss": {
+            "enabled": true,
+            "url": "YOUR DISCORD WEBHOOK URL HERE"
+        },
+        "government": {
+            "enabled": false,
+            "url": "YOUR DISCORD WEBHOOK URL HERE"
+        }
+    }
+}
