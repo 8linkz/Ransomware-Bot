@@ -7,6 +7,7 @@ type Config struct {
 	// General configuration
 	LogLevel        string        `json:"log_level"`
 	LogRotation     LogRotation   `json:"log_rotation"`
+	MaxRSSWorkers   int           `json:"max_rss_workers"`
 	APIKey          string        `json:"api_key"`
 	APIPollInterval time.Duration `json:"api_poll_interval"`
 	RSSPollInterval time.Duration `json:"rss_poll_interval"`
@@ -61,6 +62,7 @@ type FormatConfig struct {
 type GeneralConfig struct {
 	LogLevel        string      `json:"log_level"`
 	LogRotation     LogRotation `json:"log_rotation"`
+	MaxRSSWorkers   int         `json:"max_rss_workers"`
 	APIKey          string      `json:"api_key"`
 	APIPollInterval string      `json:"api_poll_interval"` // Will be parsed to time.Duration
 	RSSPollInterval string      `json:"rss_poll_interval"`
@@ -74,7 +76,8 @@ type GeneralConfig struct {
 // DefaultConfig returns a configuration with sensible defaults
 func DefaultConfig() *Config {
 	return &Config{
-		LogLevel: "INFO",
+		LogLevel:      "INFO",
+		MaxRSSWorkers: 5, // Default number of RSS workers
 		LogRotation: LogRotation{
 			MaxSizeMB:  10,   // 10 MB per file
 			MaxBackups: 5,    // Keep 5 old files

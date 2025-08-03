@@ -54,10 +54,34 @@ type DiscordSentInfo struct {
 	SentAt time.Time `json:"sent_at"`
 }
 
-// RSSStatus represents status for RSS feeds
+// RSSStatus represents status for RSS feeds with two-phase tracking
 type RSSStatus struct {
-	LastUpdated time.Time           `json:"last_updated"`
-	Feeds       map[string]FeedInfo `json:"feeds"`
+	LastUpdated time.Time                     `json:"last_updated"`
+	Feeds       map[string]FeedInfo           `json:"feeds"`
+	ParsedItems []StoredRSSEntry              `json:"parsed_items"`
+	SentItems   map[string]RSSDiscordSentInfo `json:"sent_items"`
+}
+
+// StoredRSSEntry represents a complete RSS entry for storage
+type StoredRSSEntry struct {
+	Key         string   `json:"key"`      // Unique key for tracking
+	FeedURL     string   `json:"feed_url"` // Which feed this came from
+	Title       string   `json:"title"`
+	Link        string   `json:"link"`
+	Description string   `json:"description"`
+	Published   string   `json:"published"` // Store as string for JSON
+	Author      string   `json:"author"`
+	Categories  []string `json:"categories"`
+	GUID        string   `json:"guid"`
+	FeedTitle   string   `json:"feed_title"`
+	ParsedAt    string   `json:"parsed_at"` // When it was parsed
+}
+
+// RSSDiscordSentInfo contains information about RSS items sent to Discord
+type RSSDiscordSentInfo struct {
+	Title     string    `json:"title"`      // RSS Article Title
+	FeedTitle string    `json:"feed_title"` // RSS Feed Name (extra info)
+	SentAt    time.Time `json:"sent_at"`
 }
 
 // NewTracker creates a new status tracker instance with separate files
@@ -99,6 +123,8 @@ func NewRSSStatus() *RSSStatus {
 	return &RSSStatus{
 		LastUpdated: time.Now(),
 		Feeds:       make(map[string]FeedInfo),
+		ParsedItems: make([]StoredRSSEntry, 0),
+		SentItems:   make(map[string]RSSDiscordSentInfo),
 	}
 }
 
@@ -113,8 +139,7 @@ func (t *Tracker) UpdateFeedStatus(feedURL string, success bool, entriesFound in
 	feedInfo, exists := t.rssStatus.Feeds[feedURL]
 	if !exists {
 		feedInfo = FeedInfo{
-			SuccessRate:    1.0, // Start with 100% success rate
-			ProcessedItems: make(map[string]string),
+			SuccessRate: 1.0, // Start with 100% success rate
 		}
 	}
 
@@ -180,55 +205,6 @@ func (t *Tracker) UpdateAPIStatus(success bool, entriesFound int, errorMsg strin
 	// Save API status to file
 	if err := t.saveAPIStatus(); err != nil {
 		log.WithError(err).Error("Failed to save API status to file")
-	}
-}
-
-// IsItemProcessed checks if an RSS item was already processed
-func (t *Tracker) IsItemProcessed(feedURL, itemKey string) bool {
-	t.mutex.RLock()
-	defer t.mutex.RUnlock()
-
-	feedInfo, exists := t.rssStatus.Feeds[feedURL]
-	if !exists {
-		return false
-	}
-
-	_, processed := feedInfo.ProcessedItems[itemKey]
-	return processed
-}
-
-// MarkItemProcessed marks an RSS item as processed
-func (t *Tracker) MarkItemProcessed(feedURL, itemKey, itemTitle string) {
-	t.mutex.Lock()
-	defer t.mutex.Unlock()
-
-	// Get or create feed info
-	feedInfo, exists := t.rssStatus.Feeds[feedURL]
-	if !exists {
-		feedInfo = FeedInfo{
-			SuccessRate:    1.0,
-			ProcessedItems: make(map[string]string),
-		}
-	}
-
-	// Ensure ProcessedItems map exists
-	if feedInfo.ProcessedItems == nil {
-		feedInfo.ProcessedItems = make(map[string]string)
-	}
-
-	// Mark item as processed
-	feedInfo.ProcessedItems[itemKey] = itemTitle
-
-	// Store updated feed info
-	t.rssStatus.Feeds[feedURL] = feedInfo
-	t.rssStatus.LastUpdated = time.Now()
-
-	// Clean up old entries to prevent status file from growing too large
-	t.cleanupOldRSSProcessedItems(feedURL)
-
-	// Save RSS status to file
-	if err := t.saveRSSStatus(); err != nil {
-		log.WithError(err).Error("Failed to save RSS status to file")
 	}
 }
 
@@ -394,27 +370,194 @@ func (t *Tracker) GetUnsentAPIItemsSorted() []StoredRansomwareEntry {
 	return unsent
 }
 
-// cleanupOldRSSProcessedItems removes old processed items to keep RSS status file manageable
-func (t *Tracker) cleanupOldRSSProcessedItems(feedURL string) {
-	const maxProcessedItems = 500 // Keep max 500 processed items per feed
+// RSS Two-Phase Tracking Methods
 
-	feedInfo := t.rssStatus.Feeds[feedURL]
-	if len(feedInfo.ProcessedItems) > maxProcessedItems {
-		// Keep only the most recent items (simple approach: remove randomly)
-		newMap := make(map[string]string)
+// IsRSSItemParsed checks if an RSS item was already parsed from feed
+func (t *Tracker) IsRSSItemParsed(feedURL, itemKey string) bool {
+	t.mutex.RLock()
+	defer t.mutex.RUnlock()
+
+	// Search through the slice for the key
+	for _, entry := range t.rssStatus.ParsedItems {
+		if entry.Key == itemKey && entry.FeedURL == feedURL {
+			return true
+		}
+	}
+	return false
+}
+
+// MarkRSSItemParsed marks an RSS item as parsed from feed with complete entry data
+func (t *Tracker) MarkRSSItemParsed(feedURL, itemKey string, entry StoredRSSEntry) {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
+	// Ensure ParsedItems slice exists
+	if t.rssStatus.ParsedItems == nil {
+		t.rssStatus.ParsedItems = make([]StoredRSSEntry, 0)
+	}
+
+	// Check if entry already exists (avoid duplicates)
+	for i, existing := range t.rssStatus.ParsedItems {
+		if existing.Key == itemKey && existing.FeedURL == feedURL {
+			// Update existing entry
+			entry.Key = itemKey
+			entry.FeedURL = feedURL
+			entry.ParsedAt = time.Now().Format("2006-01-02 15:04:05.999999")
+			t.rssStatus.ParsedItems[i] = entry
+			t.sortRSSParsedItems()
+			t.rssStatus.LastUpdated = time.Now()
+
+			// Save RSS status to file
+			if err := t.saveRSSStatus(); err != nil {
+				log.WithError(err).Error("Failed to save RSS status to file")
+			}
+			return
+		}
+	}
+
+	// Add new entry with metadata
+	entry.Key = itemKey
+	entry.FeedURL = feedURL
+	entry.ParsedAt = time.Now().Format("2006-01-02 15:04:05.999999")
+	t.rssStatus.ParsedItems = append(t.rssStatus.ParsedItems, entry)
+
+	// Sort by published time (oldest first) to maintain chronological order
+	t.sortRSSParsedItems()
+
+	t.rssStatus.LastUpdated = time.Now()
+
+	// Clean up old entries
+	t.cleanupOldRSSParsedItems()
+
+	// Save RSS status to file
+	if err := t.saveRSSStatus(); err != nil {
+		log.WithError(err).Error("Failed to save RSS status to file")
+	}
+}
+
+// IsRSSItemSent checks if an RSS item was already sent to Discord
+func (t *Tracker) IsRSSItemSent(itemKey string) bool {
+	t.mutex.RLock()
+	defer t.mutex.RUnlock()
+
+	_, sent := t.rssStatus.SentItems[itemKey]
+	return sent
+}
+
+// MarkRSSItemSent marks an RSS item as sent to Discord
+func (t *Tracker) MarkRSSItemSent(itemKey, itemTitle, feedTitle string) {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
+	// Ensure SentItems map exists
+	if t.rssStatus.SentItems == nil {
+		t.rssStatus.SentItems = make(map[string]RSSDiscordSentInfo)
+	}
+
+	// Mark item as sent
+	t.rssStatus.SentItems[itemKey] = RSSDiscordSentInfo{
+		Title:     itemTitle,
+		FeedTitle: feedTitle,
+		SentAt:    time.Now(),
+	}
+	t.rssStatus.LastUpdated = time.Now()
+
+	// Clean up old entries
+	t.cleanupOldRSSSentItems()
+
+	// Save RSS status to file
+	if err := t.saveRSSStatus(); err != nil {
+		log.WithError(err).Error("Failed to save RSS status to file")
+	}
+}
+
+// GetUnsentRSSItemsSorted returns a sorted slice of RSS entries that were parsed but not yet sent
+func (t *Tracker) GetUnsentRSSItemsSorted() []StoredRSSEntry {
+	t.mutex.RLock()
+	defer t.mutex.RUnlock()
+
+	var unsent []StoredRSSEntry
+
+	// Check each parsed item to see if it was sent (items are already sorted by published time)
+	for _, entry := range t.rssStatus.ParsedItems {
+		if _, sent := t.rssStatus.SentItems[entry.Key]; !sent {
+			unsent = append(unsent, entry)
+		}
+	}
+
+	log.WithField("unsent_count", len(unsent)).Debug("Retrieved unsent RSS items in chronological order")
+	return unsent
+}
+
+// sortRSSParsedItems sorts the parsed RSS items by published time (oldest first)
+func (t *Tracker) sortRSSParsedItems() {
+	sort.Slice(t.rssStatus.ParsedItems, func(i, j int) bool {
+		// Parse published times for comparison
+		timeI, errI := time.Parse("2006-01-02 15:04:05.999999", t.rssStatus.ParsedItems[i].Published)
+		if errI != nil {
+			timeI, _ = time.Parse("2006-01-02 15:04:05", t.rssStatus.ParsedItems[i].Published)
+		}
+
+		timeJ, errJ := time.Parse("2006-01-02 15:04:05.999999", t.rssStatus.ParsedItems[j].Published)
+		if errJ != nil {
+			timeJ, _ = time.Parse("2006-01-02 15:04:05", t.rssStatus.ParsedItems[j].Published)
+		}
+
+		return timeI.Before(timeJ)
+	})
+}
+
+// cleanupOldRSSParsedItems removes old parsed items
+func (t *Tracker) cleanupOldRSSParsedItems() {
+	const maxParsedItems = 1000 // Keep max 1000 parsed RSS items
+
+	if len(t.rssStatus.ParsedItems) > maxParsedItems {
+		// Keep only the most recent items (slice is already sorted by time)
+		t.rssStatus.ParsedItems = t.rssStatus.ParsedItems[len(t.rssStatus.ParsedItems)-maxParsedItems:]
+		log.Debug("Cleaned up old RSS parsed items")
+	}
+}
+
+// cleanupOldRSSSentItems removes old sent RSS items
+func (t *Tracker) cleanupOldRSSSentItems() {
+	const maxSentItems = 1000 // Keep max 1000 sent RSS items
+
+	if len(t.rssStatus.SentItems) > maxSentItems {
+		newMap := make(map[string]RSSDiscordSentInfo)
 		count := 0
-		for k, v := range feedInfo.ProcessedItems {
-			if count >= maxProcessedItems {
+		for k, v := range t.rssStatus.SentItems {
+			if count >= maxSentItems {
 				break
 			}
 			newMap[k] = v
 			count++
 		}
-		feedInfo.ProcessedItems = newMap
-		t.rssStatus.Feeds[feedURL] = feedInfo
+		t.rssStatus.SentItems = newMap
 
-		log.WithField("feed_url", feedURL).Debug("Cleaned up old RSS processed items")
+		log.Debug("Cleaned up old RSS sent items")
 	}
+}
+
+// Legacy RSS methods for backward compatibility
+
+// IsItemProcessed checks if an RSS item was already processed (legacy method)
+func (t *Tracker) IsItemProcessed(feedURL, itemKey string) bool {
+	// Delegate to new two-phase method - check if parsed
+	return t.IsRSSItemParsed(feedURL, itemKey)
+}
+
+// MarkItemProcessed marks an RSS item as processed (legacy method)
+func (t *Tracker) MarkItemProcessed(feedURL, itemKey, itemTitle string) {
+	// For legacy compatibility, we'll just mark as parsed
+	// Note: This doesn't create a full StoredRSSEntry, so it's limited
+	log.WithFields(log.Fields{
+		"feed_url":   feedURL,
+		"item_key":   itemKey,
+		"item_title": itemTitle,
+	}).Debug("Legacy MarkItemProcessed called - limited functionality")
+
+	// We can't create a full entry without more data, so we'll just log
+	// The new two-phase system should be used instead
 }
 
 // cleanupOldAPIFetchedItems removes old fetched items
@@ -612,33 +755,38 @@ func (t *Tracker) loadRSSStatus() error {
 		return fmt.Errorf("failed to unmarshal RSS status: %w", err)
 	}
 
-	// Ensure all maps are initialized
+	// Ensure all maps and slices are initialized
 	if loadedStatus.Feeds == nil {
 		loadedStatus.Feeds = make(map[string]FeedInfo)
 	}
-
-	// Ensure ProcessedItems maps exist for all feeds
-	for feedURL, feedInfo := range loadedStatus.Feeds {
-		if feedInfo.ProcessedItems == nil {
-			feedInfo.ProcessedItems = make(map[string]string)
-			loadedStatus.Feeds[feedURL] = feedInfo
-		}
+	if loadedStatus.ParsedItems == nil {
+		loadedStatus.ParsedItems = make([]StoredRSSEntry, 0)
+	}
+	if loadedStatus.SentItems == nil {
+		loadedStatus.SentItems = make(map[string]RSSDiscordSentInfo)
 	}
 
 	t.rssStatus = &loadedStatus
 
-	// Count total processed items for info
-	totalProcessed := 0
-	for _, feedInfo := range t.rssStatus.Feeds {
-		totalProcessed += len(feedInfo.ProcessedItems)
+	// Sort parsed items by published time to ensure chronological order
+	t.sortRSSParsedItems()
+
+	// Count unsent RSS items
+	unsentRSSCount := 0
+	for _, entry := range t.rssStatus.ParsedItems {
+		if _, sent := t.rssStatus.SentItems[entry.Key]; !sent {
+			unsentRSSCount++
+		}
 	}
 
 	log.WithFields(log.Fields{
-		"file":            filePath,
-		"feeds":           len(t.rssStatus.Feeds),
-		"last_updated":    t.rssStatus.LastUpdated,
-		"processed_items": totalProcessed,
-	}).Info("RSS status loaded from file")
+		"file":             filePath,
+		"feeds":            len(t.rssStatus.Feeds),
+		"last_updated":     t.rssStatus.LastUpdated,
+		"parsed_rss_items": len(t.rssStatus.ParsedItems),
+		"sent_rss_items":   len(t.rssStatus.SentItems),
+		"unsent_rss_items": unsentRSSCount,
+	}).Info("RSS status loaded from file with two-phase tracking")
 
 	return nil
 }
@@ -648,7 +796,7 @@ func (t *Tracker) PrintSummary() {
 	t.mutex.RLock()
 	defer t.mutex.RUnlock()
 
-	// Count total processed items
+	// Count API items
 	totalFetched := len(t.apiStatus.FetchedItems)
 	totalSent := len(t.apiStatus.SentItems)
 	totalUnsent := 0
@@ -659,20 +807,28 @@ func (t *Tracker) PrintSummary() {
 		}
 	}
 
-	totalRSSProcessed := 0
-	for _, feedInfo := range t.rssStatus.Feeds {
-		totalRSSProcessed += len(feedInfo.ProcessedItems)
+	// Count RSS items
+	totalRSSParsed := len(t.rssStatus.ParsedItems)
+	totalRSSSent := len(t.rssStatus.SentItems)
+	totalRSSUnsent := 0
+
+	for _, entry := range t.rssStatus.ParsedItems {
+		if _, sent := t.rssStatus.SentItems[entry.Key]; !sent {
+			totalRSSUnsent++
+		}
 	}
 
 	log.WithFields(log.Fields{
-		"total_feeds":         len(t.rssStatus.Feeds),
-		"api_last_updated":    t.apiStatus.LastUpdated,
-		"rss_last_updated":    t.rssStatus.LastUpdated,
-		"api_fetched_items":   totalFetched,
-		"api_sent_items":      totalSent,
-		"api_unsent_items":    totalUnsent,
-		"rss_processed_items": totalRSSProcessed,
-	}).Info("Status summary")
+		"total_feeds":       len(t.rssStatus.Feeds),
+		"api_last_updated":  t.apiStatus.LastUpdated,
+		"rss_last_updated":  t.rssStatus.LastUpdated,
+		"api_fetched_items": totalFetched,
+		"api_sent_items":    totalSent,
+		"api_unsent_items":  totalUnsent,
+		"rss_parsed_items":  totalRSSParsed,
+		"rss_sent_items":    totalRSSSent,
+		"rss_unsent_items":  totalRSSUnsent,
+	}).Info("Status summary with two-phase tracking")
 
 	// Log API status
 	if t.apiStatus.LastSuccess != nil {
@@ -685,13 +841,19 @@ func (t *Tracker) PrintSummary() {
 		}).Info("API status details")
 	}
 
+	// Log RSS status
+	log.WithFields(log.Fields{
+		"parsed_items": len(t.rssStatus.ParsedItems),
+		"sent_items":   len(t.rssStatus.SentItems),
+		"unsent_items": totalRSSUnsent,
+	}).Info("RSS status details with two-phase tracking")
+
 	// Log feed statuses
 	for feedURL, feedInfo := range t.rssStatus.Feeds {
 		fields := log.Fields{
-			"feed_url":        feedURL,
-			"success_rate":    fmt.Sprintf("%.1f%%", feedInfo.SuccessRate*100),
-			"last_check":      feedInfo.LastCheck,
-			"processed_items": len(feedInfo.ProcessedItems),
+			"feed_url":     feedURL,
+			"success_rate": fmt.Sprintf("%.1f%%", feedInfo.SuccessRate*100),
+			"last_check":   feedInfo.LastCheck,
 		}
 
 		if feedInfo.LastSuccess != nil {
