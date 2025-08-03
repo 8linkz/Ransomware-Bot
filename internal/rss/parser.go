@@ -1,9 +1,9 @@
 package rss
 
 import (
+	"Ransomware-Bot/internal/status"
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/mmcdole/gofeed"
@@ -22,6 +22,10 @@ type Parser struct {
 type StatusTracker interface {
 	IsItemProcessed(feedURL, itemKey string) bool
 	MarkItemProcessed(feedURL, itemKey, itemTitle string)
+
+	// New RSS two-phase tracking methods
+	IsRSSItemParsed(feedURL, itemKey string) bool
+	MarkRSSItemParsed(feedURL, itemKey string, entry status.StoredRSSEntry)
 }
 
 // Entry represents a processed RSS feed entry
@@ -35,6 +39,21 @@ type Entry struct {
 	GUID        string    `json:"guid"`
 	FeedTitle   string    `json:"feed_title"`
 	FeedURL     string    `json:"feed_url"`
+}
+
+// feedResult holds the result of parsing a single RSS feed
+type feedResult struct {
+	url     string
+	entries []Entry
+	err     error
+}
+
+// workerPool manages concurrent RSS feed processing
+type workerPool struct {
+	maxWorkers int
+	jobs       chan string
+	results    chan feedResult
+	parser     *Parser
 }
 
 // NewParser creates a new RSS parser with retry configuration
@@ -140,7 +159,8 @@ func (p *Parser) processFeedItems(feed *gofeed.Feed, feedURL string) []Entry {
 
 		// Mark as processed in persistent storage
 		if p.statusTracker != nil {
-			p.statusTracker.MarkItemProcessed(feedURL, key, entry.Title)
+			storedEntry := convertToStoredRSSEntry(entry, key)
+			p.statusTracker.MarkRSSItemParsed(feedURL, key, storedEntry)
 		}
 
 		newEntries = append(newEntries, entry)
@@ -234,6 +254,127 @@ func safeCategories(categories []string) []string {
 	return categories
 }
 
+// convertToStoredRSSEntry converts rss.Entry to status.StoredRSSEntry for persistence
+func convertToStoredRSSEntry(entry Entry, key string) status.StoredRSSEntry {
+	return status.StoredRSSEntry{
+		Key:         key,
+		FeedURL:     entry.FeedURL,
+		Title:       entry.Title,
+		Link:        entry.Link,
+		Description: entry.Description,
+		Published:   entry.Published.Format("2006-01-02 15:04:05.999999"),
+		Author:      entry.Author,
+		Categories:  entry.Categories,
+		GUID:        entry.GUID,
+		FeedTitle:   entry.FeedTitle,
+		ParsedAt:    time.Now().Format("2006-01-02 15:04:05.999999"),
+	}
+}
+
+// newWorkerPool creates a new worker pool for RSS feed processing
+func newWorkerPool(maxWorkers int, parser *Parser) *workerPool {
+	return &workerPool{
+		maxWorkers: maxWorkers,
+		jobs:       make(chan string, maxWorkers*2), // Buffer for smooth operation
+		results:    make(chan feedResult, maxWorkers*2),
+		parser:     parser,
+	}
+}
+
+// worker processes RSS feeds from the jobs channel
+func (wp *workerPool) worker(ctx context.Context) {
+	for {
+		select {
+		case url, ok := <-wp.jobs:
+			if !ok {
+				return // Jobs channel closed, worker should exit
+			}
+
+			// Process the RSS feed
+			entries, err := wp.parser.ParseFeed(ctx, url)
+
+			// Send result back
+			select {
+			case wp.results <- feedResult{url: url, entries: entries, err: err}:
+			case <-ctx.Done():
+				return
+			}
+
+		case <-ctx.Done():
+			return // Context cancelled, worker should exit
+		}
+	}
+}
+
+// processFeeds starts workers and processes all feeds with controlled concurrency
+func (wp *workerPool) processFeeds(ctx context.Context, feedURLs []string) (map[string][]Entry, error) {
+	// Start workers
+	for i := 0; i < wp.maxWorkers; i++ {
+		go wp.worker(ctx)
+	}
+
+	// Send all jobs
+	go func() {
+		defer close(wp.jobs)
+		for _, url := range feedURLs {
+			select {
+			case wp.jobs <- url:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Collect results
+	results := make(map[string][]Entry)
+	var errors []error
+
+	for i := 0; i < len(feedURLs); i++ {
+		select {
+		case result := <-wp.results:
+			if result.err != nil {
+				errors = append(errors, fmt.Errorf("failed to parse %s: %w", result.url, result.err))
+				// Include failed feeds with empty results for status tracking
+				results[result.url] = []Entry{}
+			} else {
+				results[result.url] = result.entries
+			}
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(30 * time.Second):
+			log.WithField("remaining_feeds", len(feedURLs)-i).Error("Worker pool timeout waiting for feed results")
+			// Return partial results instead of failing completely
+			return results, fmt.Errorf("worker pool timeout after processing %d of %d feeds", i, len(feedURLs))
+		}
+	}
+
+	// Log any errors but don't fail completely
+	if len(errors) > 0 {
+		log.WithField("error_count", len(errors)).Warn("Some RSS feeds failed to parse with worker pool")
+		for _, err := range errors {
+			log.WithError(err).Error("RSS worker pool parsing error")
+		}
+	}
+
+	return results, nil
+}
+
+// ParseMultipleFeeds parses multiple RSS feeds concurrently with worker pool limiting
+func (p *Parser) ParseMultipleFeeds(ctx context.Context, feedURLs []string, maxWorkers int) (map[string][]Entry, error) {
+	if len(feedURLs) == 0 {
+		return make(map[string][]Entry), nil
+	}
+
+	// Limit workers to available feeds if fewer feeds than workers
+	if maxWorkers > len(feedURLs) {
+		maxWorkers = len(feedURLs)
+	}
+
+	// Create and use worker pool for controlled concurrency
+	pool := newWorkerPool(maxWorkers, p)
+	return pool.processFeeds(ctx, feedURLs)
+}
+
 // ClearCache clears the processed items cache (now delegates to status tracker)
 func (p *Parser) ClearCache() {
 	log.Info("Clear cache requested - processed items are now managed by status tracker")
@@ -243,51 +384,4 @@ func (p *Parser) ClearCache() {
 func (p *Parser) GetCacheSize() int {
 	log.Info("Cache size requested - processed items are now managed by status tracker")
 	return 0 // Not applicable anymore
-}
-
-// ParseMultipleFeeds parses multiple RSS feeds concurrently
-func (p *Parser) ParseMultipleFeeds(ctx context.Context, feedURLs []string) (map[string][]Entry, error) {
-	results := make(map[string][]Entry)
-	var mutex sync.Mutex
-	var wg sync.WaitGroup
-
-	// Channel to collect errors
-	errChan := make(chan error, len(feedURLs))
-
-	for _, feedURL := range feedURLs {
-		wg.Add(1)
-		go func(url string) {
-			defer wg.Done()
-
-			entries, err := p.ParseFeed(ctx, url)
-			if err != nil {
-				errChan <- fmt.Errorf("failed to parse %s: %w", url, err)
-				return
-			}
-
-			mutex.Lock()
-			results[url] = entries
-			mutex.Unlock()
-		}(feedURL)
-	}
-
-	// Wait for all goroutines to complete
-	wg.Wait()
-	close(errChan)
-
-	// Collect any errors
-	var errors []error
-	for err := range errChan {
-		errors = append(errors, err)
-	}
-
-	// Return results even if some feeds failed
-	if len(errors) > 0 {
-		log.WithField("error_count", len(errors)).Warn("Some RSS feeds failed to parse")
-		for _, err := range errors {
-			log.WithError(err).Error("RSS parsing error")
-		}
-	}
-
-	return results, nil
 }

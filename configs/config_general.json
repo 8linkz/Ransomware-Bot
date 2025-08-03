@@ -6,6 +6,7 @@
         "max_age_days": 7,
         "compress": true
     },
+    "max_rss_workers": 5,
     "api_key": "YOUR RASNSOMWARE.LIVE API KEY HERE",
     "api_poll_interval": "1h",
     "api_start_time": "",
