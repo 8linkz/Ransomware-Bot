@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -54,8 +55,12 @@ func (c *Client) makeRequest(ctx context.Context, url string, target interface{}
 		return fmt.Errorf("API returned status %d: %s", resp.StatusCode, resp.Status)
 	}
 
+	// Restrict response size to prevent excessive memory usage
+	const maxResponseSize = 10 * 1024 * 1024 // 10MB
+	limitedReader := io.LimitReader(resp.Body, maxResponseSize)
+
 	// Decode JSON response
-	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+	if err := json.NewDecoder(limitedReader).Decode(target); err != nil {
 		return fmt.Errorf("failed to decode response: %w", err)
 	}
 
