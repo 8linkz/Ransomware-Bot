@@ -56,6 +56,7 @@ func loadGeneralConfig(cfg *Config, configDir string) error {
 
 	// Apply general configuration to main config
 	cfg.LogLevel = generalCfg.LogLevel
+	cfg.MaxRSSWorkers = generalCfg.MaxRSSWorkers
 	cfg.APIKey = generalCfg.APIKey
 	cfg.APIStartTime = generalCfg.APIStartTime
 	cfg.RSSRetryCount = generalCfg.RSSRetryCount
@@ -209,8 +210,8 @@ func validateConfig(cfg *Config) error {
 	}
 
 	// Validate retry count
-	if cfg.RSSRetryCount < 0 || cfg.RSSRetryCount > 10 {
-		return fmt.Errorf("rss_retry_count out of range: %d (must be 0-10)", cfg.RSSRetryCount)
+	if cfg.MaxRSSWorkers < 1 || cfg.MaxRSSWorkers > 10 {
+		return fmt.Errorf("max_rss_workers out of range: %d (must be 1-10)", cfg.MaxRSSWorkers)
 	}
 
 	return nil
