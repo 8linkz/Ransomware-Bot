@@ -1,3 +1,11 @@
+// Package config defines all configuration structures and default values
+// for the Ransomware-Bot.
+//
+// Configuration Philosophy:
+// - Sensible defaults allow minimal setup
+// - Extensive customization options for advanced users
+// - Clear separation between general, feed, and format settings
+// - Built-in validation prevents misconfigurations
 package config
 
 import "time"
