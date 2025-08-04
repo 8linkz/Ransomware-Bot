@@ -13,6 +13,23 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+// defangURL converts URLs to a safe format by replacing http/https with hxxp/hxxps
+func defangURL(url string) string {
+	if url == "" {
+		return url
+	}
+
+	// Replace http:// and https:// with defanged versions
+	if strings.HasPrefix(url, "https://") {
+		return "hxxps://" + url[8:]
+	}
+	if strings.HasPrefix(url, "http://") {
+		return "hxxp://" + url[7:]
+	}
+
+	return url
+}
+
 const (
 	// Color constants for Discord embeds
 	ColorRansomware = 0xff0000 // Red for ransomware alerts
@@ -132,7 +149,7 @@ func (w *WebhookSender) createRansomwareField(fieldName string, entry api.Ransom
 		if entry.ClaimURL != "" {
 			return &discordgo.MessageEmbedField{
 				Name:   "🔗 Ransom URL",
-				Value:  entry.ClaimURL,
+				Value:  defangURL(entry.ClaimURL),
 				Inline: false,
 			}
 		}
@@ -159,7 +176,7 @@ func (w *WebhookSender) createRansomwareField(fieldName string, entry api.Ransom
 		if entry.Screenshot != "" {
 			return &discordgo.MessageEmbedField{
 				Name:   "📸 Screenshot",
-				Value:  fmt.Sprintf("[View Screenshot](%s)", entry.Screenshot),
+				Value:  entry.Screenshot,
 				Inline: false,
 			}
 		}

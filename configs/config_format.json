@@ -9,6 +9,7 @@
     "discovered",
     "attackdate",
     "description",
+    "screenshot",
     "post_url"
   ]
 }
