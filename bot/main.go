@@ -1,3 +1,15 @@
+// Package main implements a Discord Threat Intelligence Bot that monitors
+// ransomware.live API and RSS feeds, delivering real-time cybersecurity alerts
+// to Discord channels via webhooks.
+//
+// The bot uses a modular architecture with separate components for:
+// - API polling and RSS feed parsing
+// - Message formatting and Discord webhook delivery
+// - Persistent status tracking and deduplication
+// - Configurable logging with rotation
+//
+// Configuration is managed through JSON files in the config directory.
+
 package main
 
 import (
@@ -21,6 +33,8 @@ const Version = "1.0.0"
 
 func main() {
 	// Parse command line flags
+	// -config-dir: Directory containing JSON configuration files (default: ./configs)
+	// -version: Display version information and exit
 	configDir := flag.String("config-dir", "./configs", "Directory containing configuration files")
 	version := flag.Bool("version", false, "Show version information")
 	flag.Parse()
@@ -32,6 +46,7 @@ func main() {
 	}
 
 	// Validate config directory exists
+	// Exit early if configuration cannot be loaded
 	if _, err := os.Stat(*configDir); os.IsNotExist(err) {
 		fmt.Printf("Error: Config directory '%s' does not exist\n", *configDir)
 		os.Exit(1)
@@ -85,10 +100,12 @@ func main() {
 	log.Info("Bot started successfully")
 
 	// Setup signal handling for graceful shutdown
+	// Listens for SIGINT (Ctrl+C) and SIGTERM (systemd/docker stop)
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	// Wait for shutdown signal
+	// This blocks until a termination signal is received
 	<-sigChan
 	log.Info("Shutdown signal received, stopping bot...")
 

@@ -1,3 +1,13 @@
+// Package api provides HTTP client functionality for external API communication
+// with security-hardened TLS configuration and proper error handling.
+//
+// The client supports:
+// - Hardened TLS 1.2/1.3 configuration with secure cipher suites
+// - API key authentication via X-API-KEY header
+// - Request timeouts and connection pooling
+// - JSON response parsing with memory limits
+// - Comprehensive request logging
+
 package api
 
 import (
@@ -18,6 +28,15 @@ type Client struct {
 }
 
 // NewClient creates a new API client instance with hardened TLS configuration
+//
+// Security features:
+// - Enforces TLS 1.2+ with secure cipher suites (AEAD preferred)
+// - Certificate verification always enabled
+// - Connection pooling with limits to prevent resource exhaustion
+// - Session resumption for performance
+//
+// The client is configured for production use with 30-second timeouts
+// and appropriate connection limits for concurrent requests.
 func NewClient(apiKey string) (*Client, error) {
 	// Create hardened TLS configuration
 	tlsConfig := &tls.Config{
@@ -45,6 +64,18 @@ func NewClient(apiKey string) (*Client, error) {
 	}
 
 	// Create HTTP transport with hardened TLS
+	//
+	// Security rationale:
+	// - TLS 1.2+ encryption protects API keys and sensitive data in transit
+	// - Secure cipher suites prevent downgrade attacks
+	// - Certificate verification prevents man-in-the-middle attacks
+	// - Essential for secure API key transmission to external services
+	//
+	// Performance optimizations:
+	// - Keep-alive connections enabled for efficiency
+	// - Connection pooling: max 10 idle, 5 per host
+	// - Reasonable timeouts for production environments
+	// - Session resumption reduces TLS handshake overhead
 	transport := &http.Transport{
 		TLSClientConfig:       tlsConfig,
 		DisableCompression:    false, // Keep compression for performance
@@ -65,7 +96,18 @@ func NewClient(apiKey string) (*Client, error) {
 	}, nil
 }
 
-// makeRequest performs an HTTP request with proper error handling and retries
+// makeRequest performs HTTPS requests to external APIs with comprehensive error handling
+//
+// Security measures:
+// - Enforces TLS 1.2+ encryption for all requests (configured in transport)
+// - API key transmitted securely via encrypted HTTPS headers
+// - 10MB response body limit to prevent memory exhaustion
+// - Context-aware cancellation support
+// - Certificate verification always enabled
+//
+// Authentication:
+// - Uses X-API-KEY header when API key is provided (encrypted via TLS)
+// - User-Agent mimics wget for compatibility
 func (c *Client) makeRequest(ctx context.Context, url string, target interface{}) error {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -94,6 +136,8 @@ func (c *Client) makeRequest(ctx context.Context, url string, target interface{}
 	}
 
 	// Limit response body size to prevent memory exhaustion attacks
+	// 10MB should be sufficient for API responses while protecting against
+	// malicious servers sending unlimited data
 	resp.Body = http.MaxBytesReader(nil, resp.Body, 10<<20) // 10MB limit
 
 	// Decode JSON response
@@ -104,7 +148,13 @@ func (c *Client) makeRequest(ctx context.Context, url string, target interface{}
 	return nil
 }
 
-// logRequest logs API request details
+// logRequest logs API request details for monitoring and debugging
+//
+// Logs include:
+// - Request URL (sanitized)
+// - Response time for performance monitoring
+// - Error details for troubleshooting
+// - Uses different log levels based on success/failure
 func (c *Client) logRequest(url string, duration time.Duration, err error) {
 	fields := log.Fields{
 		"url":      url,
