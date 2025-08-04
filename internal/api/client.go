@@ -93,6 +93,9 @@ func (c *Client) makeRequest(ctx context.Context, url string, target interface{}
 		return fmt.Errorf("API returned status %d: %s", resp.StatusCode, resp.Status)
 	}
 
+	// Limit response body size to prevent memory exhaustion attacks
+	resp.Body = http.MaxBytesReader(nil, resp.Body, 10<<20) // 10MB limit
+
 	// Decode JSON response
 	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
 		return fmt.Errorf("failed to decode response: %w", err)
