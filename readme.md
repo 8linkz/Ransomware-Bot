@@ -1,6 +1,6 @@
-# Discord Threat Intelligence Bot
+# Ransomware-Bot
 
-A high-performance Discord bot written in **Go** that delivers threat intelligence data via Discord webhooks. The bot fetches data from the ransomware.live API and multiple RSS feeds, providing real-time cybersecurity alerts to your Discord channels.
+A high-performance Ransomware-Bot written in **Go** that delivers threat intelligence data via Discord webhooks. The bot fetches data from the ransomware.live API and multiple RSS feeds, providing real-time cybersecurity alerts to your Discord channels.
 
 ## ⚙️ Configuration
 
