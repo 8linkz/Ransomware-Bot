@@ -1,3 +1,10 @@
+// Package config provides comprehensive configuration management for the Discord bot
+// with validation, defaults, and multi-file JSON configuration support.
+//
+// Configuration Structure:
+// - config_general.json: Core settings, API keys, webhooks, logging
+// - config_feeds.json: RSS feed URLs organized by category
+// - config_format.json: Message formatting and display options
 package config
 
 import (
@@ -12,6 +19,15 @@ import (
 )
 
 // LoadConfig loads and validates all configuration files from the specified directory
+//
+// Loading strategy:
+// 1. Start with sensible defaults from DefaultConfig()
+// 2. Override with values from config_general.json (required)
+// 3. Merge optional config_feeds.json and config_format.json
+// 4. Validate all settings for security and operational requirements
+//
+// This approach ensures the bot can start even with minimal configuration
+// while providing extensive customization options for advanced users.
 func LoadConfig(configDir string) (*Config, error) {
 	// Start with default configuration
 	cfg := DefaultConfig()
@@ -63,6 +79,8 @@ func loadGeneralConfig(cfg *Config, configDir string) error {
 	cfg.Webhooks = generalCfg.Webhooks
 
 	// Apply log rotation settings (use defaults if not specified)
+	// Prevents misconfiguration that could exhaust disk space
+	// or create too many backup files
 	if generalCfg.LogRotation.MaxSizeMB > 0 {
 		cfg.LogRotation.MaxSizeMB = generalCfg.LogRotation.MaxSizeMB
 	}
@@ -78,6 +96,8 @@ func loadGeneralConfig(cfg *Config, configDir string) error {
 	}
 
 	// Parse duration strings
+	// Supports Go duration format: "1h", "30m", "2s"
+	// Validation ensures minimum intervals to prevent API abuse
 	if generalCfg.APIPollInterval != "" {
 		duration, err := time.ParseDuration(generalCfg.APIPollInterval)
 		if err != nil {
@@ -121,6 +141,8 @@ func loadFeedsConfig(cfg *Config, configDir string) error {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		// Feeds config is optional, log warning and continue
+		// This allows the bot to start with API-only mode
+		// or with default feed configurations
 		log.WithField("path", configPath).Warn("Feeds config file not found, using defaults")
 		return nil
 	}
@@ -151,6 +173,16 @@ func loadFormatConfig(cfg *Config, configDir string) error {
 }
 
 // validateConfig validates the loaded configuration
+//
+// Security validations:
+// - Webhook URLs must use Discord's official webhook format
+// - API keys are checked if webhooks are enabled
+// - Intervals have minimum limits to prevent API abuse
+// - Log rotation limits prevent disk space exhaustion
+//
+// Operational validations:
+// - Resource limits (workers, retry counts) within reasonable bounds
+// - Time intervals long enough to avoid rate limiting
 func validateConfig(cfg *Config) error {
 	// Validate log level
 	switch strings.ToUpper(cfg.LogLevel) {
@@ -189,6 +221,7 @@ func validateConfig(cfg *Config) error {
 	}
 
 	// Validate intervals
+	// Minimum 1 minute prevents API abuse and rate limiting
 	if cfg.APIPollInterval < time.Minute {
 		return fmt.Errorf("api_poll_interval too short: %v (minimum 1 minute)", cfg.APIPollInterval)
 	}
@@ -205,6 +238,8 @@ func validateConfig(cfg *Config) error {
 	if cfg.DiscordDelay < 0 {
 		return fmt.Errorf("discord_delay cannot be negative: %v", cfg.DiscordDelay)
 	}
+	// Validate Discord delay
+	// Maximum 30 seconds prevents excessive delays in alert delivery
 	if cfg.DiscordDelay > 30*time.Second {
 		return fmt.Errorf("discord_delay too long: %v (maximum 30 seconds)", cfg.DiscordDelay)
 	}
@@ -218,6 +253,13 @@ func validateConfig(cfg *Config) error {
 }
 
 // validateWebhook validates a webhook configuration
+//
+// Security checks:
+// - Ensures webhook URL is from Discord's official domain
+// - Prevents configuration of malicious webhook endpoints
+// - URL format validation prevents injection attacks
+//
+// Only validates format - does not test webhook functionality
 func validateWebhook(name string, webhook WebhookConfig) error {
 	if webhook.Enabled {
 		if webhook.URL == "" {
