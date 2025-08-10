@@ -1,6 +1,12 @@
 # Ransomware Bot
 
 A high-performance Discord bot written in **Go** that delivers threat intelligence data via Discord webhooks. The bot fetches data from the ransomware.live API and multiple RSS feeds, providing regular cybersecurity alerts to your Discord channels.
+The original bot from vx-underground no longer works, so I built a new one (https://github.com/vxunderground/ThreatIntelligenceDiscordBot).
+
+⚠️ Disclaimer
+This bot is 100% vibe-coded - bugs are part of the experience and I provide no guarantee for 100% security.
+
+<img width="524" height="377" alt="grafik" src="https://github.com/user-attachments/assets/699b63de-043e-40cc-9fb8-e396cf55ce79" />
 
 ## 🔧 Prerequisites
 
@@ -64,6 +70,7 @@ To create Discord webhooks on your own Discord server:
 | `discord_delay` | Delay before Discord push | `"2s"`, `"1s"`, `"500ms"` |
 | `rss_retry_count` | Failed feed retry attempts | `3`, `5`, `10` |
 | `rss_retry_delay` | Delay between retries | `"2s"`, `"5s"`, `"10s"` |
+
 
 ### 2. RSS Feeds Configuration (`configs/config_feeds.json`)
 
