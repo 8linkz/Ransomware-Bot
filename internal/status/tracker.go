@@ -744,12 +744,12 @@ func (t *Tracker) loadRSSStatus() error {
 		log.WithField("file", filePath).Info("RSS status file does not exist, starting with empty status")
 		return nil
 	}
-
+	// Read the RSS status file
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to read RSS status file: %w", err)
 	}
-
+	// Unmarshal the JSON data into the RSSStatus struct
 	var loadedStatus RSSStatus
 	if err := json.Unmarshal(data, &loadedStatus); err != nil {
 		return fmt.Errorf("failed to unmarshal RSS status: %w", err)

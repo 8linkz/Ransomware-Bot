@@ -1,0 +1,16 @@
+.git
+.gitignore
+README.md
+*.md
+logs/
+*.log
+data/
+status.json
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+ransomware-bot
+*.exe
+Dockerfile
+docker-compose.yml

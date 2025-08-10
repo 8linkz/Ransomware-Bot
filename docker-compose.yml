@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  ransomware-bot:
+    build: .
+    container_name: ransomware-bot
+    restart: unless-stopped
+    volumes:
+      - ./configs:/app/config:ro
+      - ./logs:/app/logs
+      - ./data:/app/data
+    environment:
+      - TZ=UTC
