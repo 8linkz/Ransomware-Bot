@@ -24,7 +24,7 @@ To create Discord webhooks on your own Discord server:
 
 ## ⚙️ Configuration
 
-### 1. General Configuration (`configs/config_general.json`)
+### 1. General Configuration (configs/config_general.json)
 
 ```json
 {
@@ -104,7 +104,7 @@ To create Discord webhooks on your own Discord server:
 
 💡 **Tip**: You can easily add, remove, or modify feed URLs in any category to customize your threat intelligence sources.
 
-### 3. Message Formatting (`configs/config_format.json`)
+### 3. Message Formatting (configs/config_format.json)
 
 ```json
 {
