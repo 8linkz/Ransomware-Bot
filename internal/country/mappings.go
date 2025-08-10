@@ -3,7 +3,7 @@ package country
 // countryMapping maps ISO-2 country codes to full country names
 // This is a comprehensive list of country codes and names
 var countryMapping = map[string]string{
-	// Europe
+	// Europe (ISO 3166 country codes)
 	"AD": "Andorra",
 	"AL": "Albania",
 	"AT": "Austria",
@@ -51,7 +51,7 @@ var countryMapping = map[string]string{
 	"VA": "Vatican City",
 	"XK": "Kosovo",
 
-	// North America
+	// North America (ISO 3166 country codes)
 	"AG": "Antigua and Barbuda",
 	"BB": "Barbados",
 	"BZ": "Belize",
@@ -75,7 +75,7 @@ var countryMapping = map[string]string{
 	"US": "United States",
 	"VC": "Saint Vincent and the Grenadines",
 
-	// South America
+	// South America (ISO 3166 country codes)
 	"AR": "Argentina",
 	"BO": "Bolivia",
 	"BR": "Brazil",
@@ -91,7 +91,7 @@ var countryMapping = map[string]string{
 	"UY": "Uruguay",
 	"VE": "Venezuela",
 
-	// Asia
+	// Asia (ISO 3166 country codes)
 	"AE": "United Arab Emirates",
 	"AF": "Afghanistan",
 	"AM": "Armenia",
@@ -143,7 +143,7 @@ var countryMapping = map[string]string{
 	"VN": "Vietnam",
 	"YE": "Yemen",
 
-	// Africa
+	// Africa (ISO 3166 country codes)
 	"AO": "Angola",
 	"BF": "Burkina Faso",
 	"BI": "Burundi",
@@ -200,7 +200,7 @@ var countryMapping = map[string]string{
 	"ZM": "Zambia",
 	"ZW": "Zimbabwe",
 
-	// Oceania
+	// Oceania (ISO 3166 country codes)
 	"AU": "Australia",
 	"FJ": "Fiji",
 	"FM": "Micronesia",
@@ -217,7 +217,7 @@ var countryMapping = map[string]string{
 	"VU": "Vanuatu",
 	"WS": "Samoa",
 
-	// Special territories and regions
+	// Special territories and regions (ISO 3166 country codes)
 	"AS": "American Samoa",
 	"AW": "Aruba",
 	"AX": "Åland Islands",

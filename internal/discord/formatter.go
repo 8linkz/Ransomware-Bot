@@ -60,7 +60,7 @@ func (w *WebhookSender) formatRansomwareEmbed(entry api.RansomwareEntry, formatC
 			}
 			embed.Fields = append(embed.Fields, spacer)
 		}
-
+		// Create the field for the current entry
 		field := w.createRansomwareField(fieldName, entry, formatConfig.ShowUnicodeFlags)
 		if field != nil {
 			embed.Fields = append(embed.Fields, field)

@@ -257,7 +257,7 @@ func (s *Scheduler) bulkSendAPIEntriesToDiscord(entries []api.RansomwareEntry, w
 	for _, entry := range entries {
 		// Configurable delay before sending to Discord
 		time.Sleep(s.config.DiscordDelay)
-
+		// Send the entry to Discord webhook
 		if err := s.webhookSender.SendRansomwareEntry(webhookURL, entry, &s.config.Format); err != nil {
 			log.WithError(err).WithFields(log.Fields{
 				"group":  entry.Group,

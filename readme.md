@@ -1,6 +1,20 @@
-# Ransomware-Bot
+# Ransomware Bot
 
-A high-performance Ransomware-Bot written in **Go** that delivers threat intelligence data via Discord webhooks. The bot fetches data from the ransomware.live API and multiple RSS feeds, providing real-time cybersecurity alerts to your Discord channels.
+A high-performance Discord bot written in **Go** that delivers threat intelligence data via Discord webhooks. The bot fetches data from the ransomware.live API and multiple RSS feeds, providing regular cybersecurity alerts to your Discord channels.
+
+## 🔧 Prerequisites
+
+### API Key
+The ransomware.live API allows **3,000 calls per day** (API Pro). You need to request an API key at: https://www.ransomware.live/api
+
+### Discord Webhooks
+To create Discord webhooks on your own Discord server:
+1. Go to your Discord server settings
+2. Navigate to "Integrations" → "Webhooks"
+3. Click "Create Webhook"
+4. Choose the channel and copy the webhook URL
+
+⚠️ **Security Warning**: Never share your webhook URLs with others - they provide direct access to post messages in your Discord channels.
 
 ## ⚙️ Configuration
 
@@ -41,23 +55,21 @@ A high-performance Ransomware-Bot written in **Go** that delivers threat intelli
 
 **Configuration Options:**
 
-| Field | Description | Example | Default |
-|-------|-------------|---------|---------|
-| `log_level` | Logging verbosity | `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"` | `"INFO"` |
-| `api_key` | Ransomware.live API key | `"your-api-key-here"` | `""` |
-| `api_poll_interval` | API checking frequency | `"1h"`, `"30m"`, `"15m"` | `"1h"` |
-| `rss_poll_interval` | RSS checking frequency | `"30m"`, `"15m"`, `"5m"` | `"30m"` |
-| `discord_delay` | Delay before Discord push | `"2s"`, `"1s"`, `"500ms"` | `"2s"` |
-| `rss_retry_count` | Failed feed retry attempts | `3`, `5`, `10` | `3` |
-| `rss_retry_delay` | Delay between retries | `"2s"`, `"5s"`, `"10s"` | `"2s"` |
+| Field | Description | Example |
+|-------|-------------|---------|
+| `log_level` | Logging verbosity | `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"` |
+| `api_key` | Ransomware.live API key | `"your-api-key-here"` |
+| `api_poll_interval` | API checking frequency | `"1h"`, `"30m"`, `"15m"` |
+| `rss_poll_interval` | RSS checking frequency | `"30m"`, `"15m"`, `"5m"` |
+| `discord_delay` | Delay before Discord push | `"2s"`, `"1s"`, `"500ms"` |
+| `rss_retry_count` | Failed feed retry attempts | `3`, `5`, `10` |
+| `rss_retry_delay` | Delay between retries | `"2s"`, `"5s"`, `"10s"` |
 
 ### 2. RSS Feeds Configuration (`configs/config_feeds.json`)
 
 ```json
 {
-  "ransomware_feeds": [
-    "https://example.com/ransomware.xml"
-  ],
+  "ransomware_feeds": [],
   "government_feeds": [
     "https://www.cisa.gov/uscert/ncas/alerts.xml",
     "https://www.ncsc.gov.uk/api/1/services/v1/report-rss-feed.xml",
@@ -72,12 +84,18 @@ A high-performance Ransomware-Bot written in **Go** that delivers threat intelli
     "https://securelist.com/feed/",
     "https://research.checkpoint.com/feed/",
     "https://www.proofpoint.com/us/rss.xml",
-    "https://cybersecurity.att.com/site/blog-all-rss",
     "https://redcanary.com/feed/",
     "https://www.sentinelone.com/feed/"
   ]
 }
 ```
+
+**Feed Categories:**
+- `ransomware_feeds` - RSS feeds specific to ransomware threats (routed to ransomware webhook)
+- `government_feeds` - Government cybersecurity alerts (routed to government webhook)  
+- `general_feeds` - General cybersecurity news and research (routed to RSS webhook)
+
+💡 **Tip**: You can easily add, remove, or modify feed URLs in any category to customize your threat intelligence sources.
 
 ### 3. Message Formatting (`configs/config_format.json`)
 
@@ -97,6 +115,12 @@ A high-performance Ransomware-Bot written in **Go** that delivers threat intelli
 }
 ```
 
+**Formatting Options:**
+- `show_unicode_flags` - Display country flag emojis (🇺🇸, 🇩🇪, etc.)
+- `field_order` - Customizable order of fields in Discord messages
+
+💡 **Tip**: You can reorder fields or remove unwanted ones from the `field_order` array to customize your Discord message layout.
+
 **Available Fields (if available):**
 - `id` - Unique entry identifier
 - `victim` - Target organization
@@ -110,6 +134,35 @@ A high-performance Ransomware-Bot written in **Go** that delivers threat intelli
 - `description` - Attack details
 - `screenshot` - Ransom note screenshot
 - `published` - Publication timestamp
+
+## 📦 Docker Compatibility
+
+✅ **Tested on Unraid**: This container has been successfully tested on Unraid without any issues.  
+✅ **Lightweight**: Docker image size is approximately ~36MB
+
+### Building the Container
+
+```bash
+# Clone the repository
+git clone <repository-url>
+cd <repository-name>
+
+# Build the Docker image
+docker build -t ransomware-bot .
+
+# Save the image as a tar file (optional)
+docker save -o ransomware-bot.tar ransomware-bot:latest
+
+# Or use Docker Compose to build and run
+docker-compose up -d --build
+```
+
+### Required Volume Mounts
+* **Configuration**: `/app/config` - Mount your config directory here
+* **Logs**: `/app/logs` - Application logs with rotation  
+* **Data**: `/app/data` - **Critical for persistence** (status tracking/deduplication)
+
+⚠️ **Important**: Without the `/app/data` volume, all processed items tracking will be lost on container restart, causing duplicate Discord messages.
 
 ## Acknowledgments
 
