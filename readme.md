@@ -4,7 +4,7 @@ A high-performance Discord bot written in **Go** that delivers threat intelligen
 The original bot from vx-underground no longer works, so I built a new one (https://github.com/vxunderground/ThreatIntelligenceDiscordBot).
 
 ⚠️ Disclaimer
-This bot is 100% vibe-coded - bugs are part of the experience and I provide no guarantee for 100% security.
+This bot is 100% vibe-coded - I provide no guarantee for 100% security.
 
 <img width="524" height="377" alt="grafik" src="https://github.com/user-attachments/assets/699b63de-043e-40cc-9fb8-e396cf55ce79" />
 
