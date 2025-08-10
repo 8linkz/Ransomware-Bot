@@ -72,7 +72,7 @@ To create Discord webhooks on your own Discord server:
 | `rss_retry_delay` | Delay between retries | `"2s"`, `"5s"`, `"10s"` |
 
 
-### 2. RSS Feeds Configuration (`configs/config_feeds.json`)
+### 2. RSS Feeds Configuration (configs/config_feeds.json)
 
 ```json
 {
