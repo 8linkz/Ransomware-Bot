@@ -4,6 +4,8 @@ import (
 	"Ransomware-Bot/internal/status"
 	"context"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/mmcdole/gofeed"
@@ -146,7 +148,7 @@ func (p *Parser) processFeedItems(feed *gofeed.Feed, feedURL string) []Entry {
 		entry := Entry{
 			Title:       safeString(item.Title),
 			Link:        safeString(item.Link),
-			Description: safeString(item.Description),
+			Description: stripHTML(safeString(item.Description)),
 			Author:      getAuthorName(item),
 			Categories:  safeCategories(item.Categories),
 			GUID:        safeString(item.GUID),
@@ -384,4 +386,27 @@ func (p *Parser) ClearCache() {
 func (p *Parser) GetCacheSize() int {
 	log.Info("Cache size requested - processed items are now managed by status tracker")
 	return 0 // Not applicable anymore
+}
+
+// stripHTML removes HTML tags and decodes HTML entities from text
+func stripHTML(input string) string {
+	if input == "" {
+		return ""
+	}
+
+	// Remove HTML tags using regex
+	re := regexp.MustCompile(`<[^>]*>`)
+	text := re.ReplaceAllString(input, "")
+
+	// Decode common HTML entities
+	text = strings.ReplaceAll(text, "&lt;", "<")
+	text = strings.ReplaceAll(text, "&gt;", ">")
+	text = strings.ReplaceAll(text, "&amp;", "&")
+	text = strings.ReplaceAll(text, "&quot;", "\"")
+	text = strings.ReplaceAll(text, "&#39;", "'")
+	text = strings.ReplaceAll(text, "&nbsp;", " ")
+
+	// Clean up multiple spaces and trim
+	text = regexp.MustCompile(`\s+`).ReplaceAllString(text, " ")
+	return strings.TrimSpace(text)
 }
