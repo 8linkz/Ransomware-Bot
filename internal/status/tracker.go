@@ -509,7 +509,7 @@ func (t *Tracker) sortRSSParsedItems() {
 
 // cleanupOldRSSParsedItems removes old parsed items
 func (t *Tracker) cleanupOldRSSParsedItems() {
-	const maxParsedItems = 1000 // Keep max 1000 parsed RSS items
+	const maxParsedItems = 5000 // Keep max 1000 parsed RSS items
 
 	if len(t.rssStatus.ParsedItems) > maxParsedItems {
 		// Keep only the most recent items (slice is already sorted by time)
