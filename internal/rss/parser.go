@@ -4,6 +4,8 @@ import (
 	"Ransomware-Bot/internal/status"
 	"context"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/mmcdole/gofeed"
@@ -146,7 +148,7 @@ func (p *Parser) processFeedItems(feed *gofeed.Feed, feedURL string) []Entry {
 		entry := Entry{
 			Title:       safeString(item.Title),
 			Link:        safeString(item.Link),
-			Description: safeString(item.Description),
+			Description: stripHTML(safeString(item.Description)),
 			Author:      getAuthorName(item),
 			Categories:  safeCategories(item.Categories),
 			GUID:        safeString(item.GUID),
@@ -175,30 +177,25 @@ func (p *Parser) generateItemKey(feedURL string, item *gofeed.Item) string {
 		return feedURL + ":nil-item"
 	}
 
-	// Prefer GUID if available
+	// Prefer GUID if available (most stable)
 	if item.GUID != "" {
 		return feedURL + ":" + item.GUID
 	}
 
-	// Fallback to link if available
+	// Fallback to link if available (very stable)
 	if item.Link != "" {
 		return feedURL + ":" + item.Link
 	}
 
-	// Fallback to title + publication date
-	dateStr := ""
-	if item.PublishedParsed != nil {
-		dateStr = item.PublishedParsed.Format(time.RFC3339)
-	} else if item.UpdatedParsed != nil {
-		dateStr = item.UpdatedParsed.Format(time.RFC3339)
-	}
-
-	title := ""
+	// Last resort: use title only (without date to avoid duplicates)
+	// Normalize title by trimming and converting to lowercase
 	if item.Title != "" {
-		title = item.Title
+		normalizedTitle := strings.ToLower(strings.TrimSpace(item.Title))
+		return feedURL + ":" + normalizedTitle
 	}
 
-	return feedURL + ":" + title + ":" + dateStr
+	// Ultimate fallback
+	return feedURL + ":unknown-item"
 }
 
 // getAuthorName safely extracts author name from RSS item
@@ -384,4 +381,27 @@ func (p *Parser) ClearCache() {
 func (p *Parser) GetCacheSize() int {
 	log.Info("Cache size requested - processed items are now managed by status tracker")
 	return 0 // Not applicable anymore
+}
+
+// stripHTML removes HTML tags and decodes HTML entities from text
+func stripHTML(input string) string {
+	if input == "" {
+		return ""
+	}
+
+	// Remove HTML tags using regex
+	re := regexp.MustCompile(`<[^>]*>`)
+	text := re.ReplaceAllString(input, "")
+
+	// Decode common HTML entities
+	text = strings.ReplaceAll(text, "&lt;", "<")
+	text = strings.ReplaceAll(text, "&gt;", ">")
+	text = strings.ReplaceAll(text, "&amp;", "&")
+	text = strings.ReplaceAll(text, "&quot;", "\"")
+	text = strings.ReplaceAll(text, "&#39;", "'")
+	text = strings.ReplaceAll(text, "&nbsp;", " ")
+
+	// Clean up multiple spaces and trim
+	text = regexp.MustCompile(`\s+`).ReplaceAllString(text, " ")
+	return strings.TrimSpace(text)
 }
