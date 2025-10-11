@@ -243,11 +243,24 @@ func convertToStoredEntry(entry RansomwareEntry) status.StoredRansomwareEntry {
 //
 // This ensures consistent deduplication even if API format changes.
 func generateEntryKey(entry RansomwareEntry) string {
-	// Use a combination of fields that should be unique per entry
+	// Use ID if available
 	if entry.ID != "" {
 		return "id:" + entry.ID
 	}
 
-	// Fallback to combination of group, victim, and discovery time
-	return entry.Group + ":" + entry.Victim + ":" + entry.Discovered.Time.Format(time.RFC3339)
+	// Use a stable combination that won't change
+	// Group + Victim should be unique enough for ransomware incidents
+	baseKey := entry.Group + ":" + entry.Victim
+
+	// Add country if available for additional uniqueness
+	if entry.Country != "" {
+		baseKey += ":" + entry.Country
+	}
+
+	// Only add attack date if available (more stable than discovered time)
+	if entry.AttackDate != "" {
+		baseKey += ":" + entry.AttackDate
+	}
+
+	return baseKey
 }
