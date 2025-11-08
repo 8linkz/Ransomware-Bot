@@ -11,10 +11,7 @@ FROM alpine:latest
 # Update and install necessary packages
 RUN apk update && \
     apk upgrade --no-cache && \
-    apk add --no-cache \
-    ca-certificates \
-    tzdata \
-    openssl \
+    apk add --no-cache ca-certificates tzdata openssl && \
     rm -rf /var/cache/apk/*
 
 WORKDIR /app

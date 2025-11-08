@@ -151,6 +151,11 @@ func loadFeedsConfig(cfg *Config, configDir string) error {
 		return fmt.Errorf("failed to parse feeds config file %s: %w", configPath, err)
 	}
 
+	// Validate RSS feed URLs
+	if err := validateFeedURLs(cfg); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -269,5 +274,50 @@ func validateWebhook(name string, webhook WebhookConfig) error {
 			return fmt.Errorf("%s webhook URL is not a valid Discord webhook URL", name)
 		}
 	}
+	return nil
+}
+
+// validateFeedURLs validates all RSS feed URLs to prevent security issues
+//
+// Security checks:
+// - Only allows http:// and https:// protocols
+// - Prevents file:// protocol (local file access)
+// - Prevents ftp:// and other protocols
+// - Mitigates SSRF attacks by restricting protocols
+func validateFeedURLs(cfg *Config) error {
+	// Validate all ransomware feeds
+	for i, url := range cfg.Feeds.RansomwareFeeds {
+		if err := validateFeedURL(url, fmt.Sprintf("ransomware_feeds[%d]", i)); err != nil {
+			return err
+		}
+	}
+
+	// Validate all government feeds
+	for i, url := range cfg.Feeds.GovernmentFeeds {
+		if err := validateFeedURL(url, fmt.Sprintf("government_feeds[%d]", i)); err != nil {
+			return err
+		}
+	}
+
+	// Validate all general feeds
+	for i, url := range cfg.Feeds.GeneralFeeds {
+		if err := validateFeedURL(url, fmt.Sprintf("general_feeds[%d]", i)); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateFeedURL validates a single RSS feed URL
+func validateFeedURL(url, name string) error {
+	if url == "" {
+		return fmt.Errorf("feed '%s' has empty URL", name)
+	}
+
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		return fmt.Errorf("feed '%s' URL must use http or https protocol: %s", name, url)
+	}
+
 	return nil
 }

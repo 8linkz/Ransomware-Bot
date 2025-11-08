@@ -1,0 +1,38 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+ransomware-bot
+
+# Data and logs (contains sensitive victim information)
+bot/data/
+bot/logs/
+data/
+logs/
+*.log
+*.json.tmp
+
+# Config files with secrets
+config_general.json
+.env
+.env.local
+*.secret
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Go
+vendor/
+*.test
+*.out
+go.work
+go.work.sum
+
+# Build artifacts
+dist/
+build/
+tmp/

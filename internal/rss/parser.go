@@ -12,6 +12,12 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// Pre-compiled regex patterns for HTML stripping (performance optimization)
+var (
+	htmlTagRegex    = regexp.MustCompile(`<[^>]*>`)
+	whitespaceRegex = regexp.MustCompile(`\s+`)
+)
+
 // Parser handles RSS feed parsing with retry logic and deduplication
 type Parser struct {
 	parser        *gofeed.Parser
@@ -305,9 +311,13 @@ func (wp *workerPool) worker(ctx context.Context) {
 
 // processFeeds starts workers and processes all feeds with controlled concurrency
 func (wp *workerPool) processFeeds(ctx context.Context, feedURLs []string) (map[string][]Entry, error) {
+	// Create a child context that we can cancel to stop all workers
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel() // Always cancel workers when returning
+
 	// Start workers
 	for i := 0; i < wp.maxWorkers; i++ {
-		go wp.worker(ctx)
+		go wp.worker(workerCtx)
 	}
 
 	// Send all jobs
@@ -316,7 +326,7 @@ func (wp *workerPool) processFeeds(ctx context.Context, feedURLs []string) (map[
 		for _, url := range feedURLs {
 			select {
 			case wp.jobs <- url:
-			case <-ctx.Done():
+			case <-workerCtx.Done():
 				return
 			}
 		}
@@ -337,9 +347,12 @@ func (wp *workerPool) processFeeds(ctx context.Context, feedURLs []string) (map[
 				results[result.url] = result.entries
 			}
 		case <-ctx.Done():
+			// Parent context cancelled - cancel workers and return
 			return nil, ctx.Err()
 		case <-time.After(30 * time.Second):
 			log.WithField("remaining_feeds", len(feedURLs)-i).Error("Worker pool timeout waiting for feed results")
+			// Cancel workers before returning to prevent goroutine leak
+			cancel()
 			// Return partial results instead of failing completely
 			return results, fmt.Errorf("worker pool timeout after processing %d of %d feeds", i, len(feedURLs))
 		}
@@ -389,9 +402,8 @@ func stripHTML(input string) string {
 		return ""
 	}
 
-	// Remove HTML tags using regex
-	re := regexp.MustCompile(`<[^>]*>`)
-	text := re.ReplaceAllString(input, "")
+	// Remove HTML tags using pre-compiled regex
+	text := htmlTagRegex.ReplaceAllString(input, "")
 
 	// Decode common HTML entities
 	text = strings.ReplaceAll(text, "&lt;", "<")
@@ -401,7 +413,7 @@ func stripHTML(input string) string {
 	text = strings.ReplaceAll(text, "&#39;", "'")
 	text = strings.ReplaceAll(text, "&nbsp;", " ")
 
-	// Clean up multiple spaces and trim
-	text = regexp.MustCompile(`\s+`).ReplaceAllString(text, " ")
+	// Clean up multiple spaces and trim using pre-compiled regex
+	text = whitespaceRegex.ReplaceAllString(text, " ")
 	return strings.TrimSpace(text)
 }
