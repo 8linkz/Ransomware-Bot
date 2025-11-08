@@ -6,7 +6,7 @@ services:
     container_name: ransomware-bot
     restart: unless-stopped
     volumes:
-      - ./configs:/app/config:ro
+      - ./configs:/app/configs:ro
       - ./logs:/app/logs
       - ./data:/app/data
     environment:
