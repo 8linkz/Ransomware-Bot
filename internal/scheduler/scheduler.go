@@ -280,13 +280,26 @@ func (s *Scheduler) bulkSendAPIEntriesToDiscord(entries []api.RansomwareEntry, w
 
 // generateAPIEntryKey creates a unique key for an API entry (same logic as in api package)
 func (s *Scheduler) generateAPIEntryKey(entry api.RansomwareEntry) string {
-	// Use a combination of fields that should be unique per entry
+	// Use ID if available
 	if entry.ID != "" {
 		return "id:" + entry.ID
 	}
 
-	// Fallback to combination of group, victim, and discovery time
-	return entry.Group + ":" + entry.Victim + ":" + entry.Discovered.Time.Format(time.RFC3339)
+	// Use a stable combination that won't change
+	// Group + Victim should be unique enough for ransomware incidents
+	baseKey := entry.Group + ":" + entry.Victim
+
+	// Add country if available for additional uniqueness
+	if entry.Country != "" {
+		baseKey += ":" + entry.Country
+	}
+
+	// Only add attack date if available (more stable than discovered time)
+	if entry.AttackDate != "" {
+		baseKey += ":" + entry.AttackDate
+	}
+
+	return baseKey
 }
 
 // checkRSSOnce performs a single RSS feed check with recovery
@@ -532,6 +545,11 @@ func (s *Scheduler) generateRSSEntryKey(feedURL string, entry rss.Entry) string 
 	}
 
 	// Fallback to title + publication date
-	dateStr := entry.Published.Format(time.RFC3339)
+	// Use the same logic as parser.go - check if Published is zero time
+	dateStr := ""
+	if !entry.Published.IsZero() {
+		dateStr = entry.Published.Format(time.RFC3339)
+	}
+
 	return feedURL + ":" + entry.Title + ":" + dateStr
 }
