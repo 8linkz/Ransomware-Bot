@@ -1,13 +1,25 @@
-version: '3.8'
-
 services:
   ransomware-bot:
     build: .
     container_name: ransomware-bot
     restart: unless-stopped
+    init: true
+    user: "botuser"
     volumes:
       - ./configs:/app/configs:ro
       - ./logs:/app/logs
       - ./data:/app/data
     environment:
       - TZ=UTC
+
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
