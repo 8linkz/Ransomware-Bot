@@ -23,7 +23,7 @@ func NewWebhookSender() *WebhookSender {
 	// The empty token is fine since we're only using webhook functionality
 	session, err := discordgo.New("")
 	if err != nil {
-		log.WithError(err).Warn("Failed to create Discord session, webhook operations may be limited")
+		log.WithError(err).Fatal("Failed to create Discord session, webhook operations may be limited")
 	}
 
 	return &WebhookSender{

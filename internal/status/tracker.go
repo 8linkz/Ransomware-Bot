@@ -509,7 +509,7 @@ func (t *Tracker) sortRSSParsedItems() {
 
 // cleanupOldRSSParsedItems removes old parsed items
 func (t *Tracker) cleanupOldRSSParsedItems() {
-	const maxParsedItems = 5000 // Keep max 1000 parsed RSS items
+	const maxParsedItems = 5000 // Keep max 5000 parsed RSS items
 
 	if len(t.rssStatus.ParsedItems) > maxParsedItems {
 		// Keep only the most recent items (slice is already sorted by time)
@@ -519,22 +519,38 @@ func (t *Tracker) cleanupOldRSSParsedItems() {
 }
 
 // cleanupOldRSSSentItems removes old sent RSS items
+// NOTE: Must be called with t.mutex locked
 func (t *Tracker) cleanupOldRSSSentItems() {
 	const maxSentItems = 1000 // Keep max 1000 sent RSS items
 
 	if len(t.rssStatus.SentItems) > maxSentItems {
-		newMap := make(map[string]RSSDiscordSentInfo)
-		count := 0
+		// Create slice of items with timestamps for sorting
+		type itemWithTime struct {
+			key  string
+			info RSSDiscordSentInfo
+		}
+		items := make([]itemWithTime, 0, len(t.rssStatus.SentItems))
 		for k, v := range t.rssStatus.SentItems {
-			if count >= maxSentItems {
-				break
-			}
-			newMap[k] = v
-			count++
+			items = append(items, itemWithTime{k, v})
+		}
+
+		// Sort by timestamp (oldest first)
+		sort.Slice(items, func(i, j int) bool {
+			return items[i].info.SentAt.Before(items[j].info.SentAt)
+		})
+
+		// Keep only the most recent maxSentItems
+		newMap := make(map[string]RSSDiscordSentInfo, maxSentItems)
+		startIdx := len(items) - maxSentItems
+		for i := startIdx; i < len(items); i++ {
+			newMap[items[i].key] = items[i].info
 		}
 		t.rssStatus.SentItems = newMap
 
-		log.Debug("Cleaned up old RSS sent items")
+		log.WithFields(log.Fields{
+			"removed": len(items) - maxSentItems,
+			"kept":    maxSentItems,
+		}).Debug("Cleaned up old RSS sent items")
 	}
 }
 
@@ -572,22 +588,38 @@ func (t *Tracker) cleanupOldAPIFetchedItems() {
 }
 
 // cleanupOldAPISentItems removes old sent items
+// NOTE: Must be called with t.mutex locked
 func (t *Tracker) cleanupOldAPISentItems() {
 	const maxSentItems = 1000 // Keep max 1000 sent API items
 
 	if len(t.apiStatus.SentItems) > maxSentItems {
-		newMap := make(map[string]DiscordSentInfo)
-		count := 0
+		// Create slice of items with timestamps for sorting
+		type itemWithTime struct {
+			key  string
+			info DiscordSentInfo
+		}
+		items := make([]itemWithTime, 0, len(t.apiStatus.SentItems))
 		for k, v := range t.apiStatus.SentItems {
-			if count >= maxSentItems {
-				break
-			}
-			newMap[k] = v
-			count++
+			items = append(items, itemWithTime{k, v})
+		}
+
+		// Sort by timestamp (oldest first)
+		sort.Slice(items, func(i, j int) bool {
+			return items[i].info.SentAt.Before(items[j].info.SentAt)
+		})
+
+		// Keep only the most recent maxSentItems
+		newMap := make(map[string]DiscordSentInfo, maxSentItems)
+		startIdx := len(items) - maxSentItems
+		for i := startIdx; i < len(items); i++ {
+			newMap[items[i].key] = items[i].info
 		}
 		t.apiStatus.SentItems = newMap
 
-		log.Debug("Cleaned up old API sent items")
+		log.WithFields(log.Fields{
+			"removed": len(items) - maxSentItems,
+			"kept":    maxSentItems,
+		}).Debug("Cleaned up old API sent items")
 	}
 }
 
@@ -619,7 +651,7 @@ func (t *Tracker) saveAPIStatus() error {
 
 	// Write to temporary file first, then rename for atomic update
 	tempFile := filePath + ".tmp"
-	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+	if err := os.WriteFile(tempFile, data, 0600); err != nil {
 		return fmt.Errorf("failed to write temporary API status file: %w", err)
 	}
 
@@ -642,7 +674,7 @@ func (t *Tracker) saveRSSStatus() error {
 
 	// Write to temporary file first, then rename for atomic update
 	tempFile := filePath + ".tmp"
-	if err := os.WriteFile(tempFile, data, 0644); err != nil {
+	if err := os.WriteFile(tempFile, data, 0600); err != nil {
 		return fmt.Errorf("failed to write temporary RSS status file: %w", err)
 	}
 
@@ -680,6 +712,10 @@ func (t *Tracker) loadAPIStatus() error {
 	if loadedStatus.SentItems == nil {
 		loadedStatus.SentItems = make(map[string]DiscordSentInfo)
 	}
+
+	// Lock mutex before modifying shared state
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
 
 	// Migrate old map-based storage to new slice-based storage if needed
 	t.migrateOldFormat(&loadedStatus)
@@ -744,18 +780,18 @@ func (t *Tracker) loadRSSStatus() error {
 		log.WithField("file", filePath).Info("RSS status file does not exist, starting with empty status")
 		return nil
 	}
-	// Read the RSS status file
+
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to read RSS status file: %w", err)
 	}
-	// Unmarshal the JSON data into the RSSStatus struct
+
 	var loadedStatus RSSStatus
 	if err := json.Unmarshal(data, &loadedStatus); err != nil {
 		return fmt.Errorf("failed to unmarshal RSS status: %w", err)
 	}
 
-	// Ensure all maps and slices are initialized
+	// Ensure data structures exist
 	if loadedStatus.Feeds == nil {
 		loadedStatus.Feeds = make(map[string]FeedInfo)
 	}
@@ -766,27 +802,30 @@ func (t *Tracker) loadRSSStatus() error {
 		loadedStatus.SentItems = make(map[string]RSSDiscordSentInfo)
 	}
 
-	t.rssStatus = &loadedStatus
+	// Lock mutex before modifying shared state
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
 
 	// Sort parsed items by published time to ensure chronological order
+	t.rssStatus = &loadedStatus
 	t.sortRSSParsedItems()
 
-	// Count unsent RSS items
-	unsentRSSCount := 0
+	// Count unsent items
+	unsentCount := 0
 	for _, entry := range t.rssStatus.ParsedItems {
 		if _, sent := t.rssStatus.SentItems[entry.Key]; !sent {
-			unsentRSSCount++
+			unsentCount++
 		}
 	}
 
 	log.WithFields(log.Fields{
-		"file":             filePath,
-		"feeds":            len(t.rssStatus.Feeds),
-		"last_updated":     t.rssStatus.LastUpdated,
-		"parsed_rss_items": len(t.rssStatus.ParsedItems),
-		"sent_rss_items":   len(t.rssStatus.SentItems),
-		"unsent_rss_items": unsentRSSCount,
-	}).Info("RSS status loaded from file with two-phase tracking")
+		"file":         filePath,
+		"last_updated": t.rssStatus.LastUpdated,
+		"feeds":        len(t.rssStatus.Feeds),
+		"parsed_items": len(t.rssStatus.ParsedItems),
+		"sent_items":   len(t.rssStatus.SentItems),
+		"unsent_items": unsentCount,
+	}).Info("RSS status loaded from file in chronological order")
 
 	return nil
 }

@@ -7,7 +7,7 @@
         "compress": true
     },
     "max_rss_workers": 5,
-    "api_key": "YOUR RASNSOMWARE.LIVE API KEY HERE",
+    "api_key": "YOUR RANSOMWARE.LIVE API KEY HERE",
     "api_poll_interval": "1h",
     "api_start_time": "",
     "rss_poll_interval": "30m",
