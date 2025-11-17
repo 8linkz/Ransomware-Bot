@@ -176,10 +176,15 @@ func (w *WebhookSender) createRansomwareField(fieldName string, entry api.Ransom
 		}
 
 	case "description":
-		if entry.Description != "" && len(entry.Description) <= 1024 {
+		if entry.Description != "" {
+			// Truncate to 500 characters to avoid MAX_EMBED_SIZE_EXCEEDED
+			desc := entry.Description
+			if len(desc) > 500 {
+				desc = desc[:497] + "..."
+			}
 			return &discordgo.MessageEmbedField{
 				Name:   "📝 Description",
-				Value:  entry.Description,
+				Value:  desc,
 				Inline: false,
 			}
 		}

@@ -7,25 +7,40 @@
         "compress": true
     },
     "max_rss_workers": 5,
-    "api_key": "YOUR RANSOMWARE.LIVE API KEY HERE",
+    "api_key": "YOUR RANSOMEWARELIVE API KEY HERE",
     "api_poll_interval": "1h",
     "api_start_time": "",
     "rss_poll_interval": "30m",
     "rss_retry_count": 3,
     "rss_retry_delay": "2s",
     "discord_delay": "2s",
-    "webhooks": {
+    "discord_webhooks": {
         "ransomware": {
-            "enabled": true,
+            "enabled": false,
             "url": "YOUR DISCORD WEBHOOK URL HERE"
         },
         "rss": {
-            "enabled": true,
+            "enabled": false,
             "url": "YOUR DISCORD WEBHOOK URL HERE"
         },
         "government": {
             "enabled": false,
             "url": "YOUR DISCORD WEBHOOK URL HERE"
+        }
+    },
+    "slack_delay": "2s",
+    "slack_webhooks": {
+        "ransomware": {
+            "enabled": false,
+            "url": "YOUR SLACK WEBHOOK URL HERE"
+        },
+        "rss": {
+            "enabled": false,
+            "url": "YOUR SLACK WEBHOOK URL HERE"
+        },
+        "government": {
+            "enabled": false,
+            "url": "YOUR SLACK WEBHOOK URL HERE"
         }
     }
 }

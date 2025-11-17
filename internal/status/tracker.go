@@ -55,7 +55,7 @@ type WebhookSentInfo struct {
 	Title      string    `json:"title"`
 	SentAt     time.Time `json:"sent_at"`
 	ItemKey    string    `json:"item_key"`     // Added for reverse lookup
-	WebhookURL string    `json:"webhook_url"`  // Now stored for lookups (hashed keys make prefix search impossible)
+	WebhookURL string    `json:"-"`            // Not stored in JSON (security) - only used in memory
 }
 
 // RSSStatus represents status for RSS feeds with two-phase tracking
@@ -72,7 +72,7 @@ type RSSWebhookSentInfo struct {
 	FeedTitle  string    `json:"feed_title"`  // RSS Feed Name (extra info)
 	SentAt     time.Time `json:"sent_at"`
 	ItemKey    string    `json:"item_key"`    // Added for reverse lookup
-	WebhookURL string    `json:"webhook_url"` // Now stored for lookups
+	WebhookURL string    `json:"-"`           // Not stored in JSON (security) - only used in memory
 }
 
 // StoredRSSEntry represents a complete RSS entry for storage

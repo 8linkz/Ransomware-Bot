@@ -73,11 +73,16 @@ func main() {
 		MaxAgeDays: cfg.LogRotation.MaxAgeDays,
 		Compress:   cfg.LogRotation.Compress,
 	}
-	_, err = logger.NewLogger(cfg.LogLevel, filepath.Join(logDir, "bot.log"), rotationConfig)
+	err = logger.NewLogger(cfg.LogLevel, filepath.Join(logDir, "bot.log"), rotationConfig)
 	if err != nil {
 		fmt.Printf("Error setting up logger: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Test logging immediately after initialization
+	log.Info("=== Logger test from main.go ===")
+	log.WithField("test", "value").Debug("Debug log from main")
+	log.Error("Error log from main - this is a test")
 
 	// Log initial message using the standard logrus logger
 	log.WithField("version", Version).Info("Starting Discord Threat Intelligence Bot")

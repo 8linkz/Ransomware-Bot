@@ -22,10 +22,10 @@
       "activity",
       "attackdate",
       "discovered",
-      "claim_url",
-      "url",
-      "description",
-      "screenshot"
+      "screenshot",
+      "post_url",
+      "website",
+      "description"
     ]
   }
 }
