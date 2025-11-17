@@ -22,8 +22,10 @@ type Config struct {
 	APIStartTime    string        `json:"api_start_time"`
 	RSSRetryCount   int           `json:"rss_retry_count"`
 	RSSRetryDelay   time.Duration `json:"rss_retry_delay"`
-	DiscordDelay    time.Duration `json:"discord_delay"` // Configurable delay before Discord push
-	Webhooks        Webhooks      `json:"webhooks"`
+	DiscordDelay    time.Duration    `json:"discord_delay"` // Configurable delay before Discord push
+	DiscordWebhooks DiscordWebhooks `json:"discord_webhooks"`
+	SlackDelay      time.Duration   `json:"slack_delay"`    // Configurable delay before Slack push
+	SlackWebhooks   SlackWebhooks   `json:"slack_webhooks"`
 
 	// Feed configuration
 	Feeds FeedConfig `json:"feeds"`
@@ -40,8 +42,15 @@ type LogRotation struct {
 	Compress   bool `json:"compress"`     // Whether to compress old log files
 }
 
-// Webhooks configuration for Discord webhook URLs
-type Webhooks struct {
+// DiscordWebhooks configuration for Discord webhook URLs
+type DiscordWebhooks struct {
+	Ransomware WebhookConfig `json:"ransomware"`
+	RSS        WebhookConfig `json:"rss"`
+	Government WebhookConfig `json:"government"`
+}
+
+// SlackWebhooks configuration for Slack webhook URLs
+type SlackWebhooks struct {
 	Ransomware WebhookConfig `json:"ransomware"`
 	RSS        WebhookConfig `json:"rss"`
 	Government WebhookConfig `json:"government"`
@@ -62,8 +71,16 @@ type FeedConfig struct {
 
 // FormatConfig defines how messages should be formatted
 type FormatConfig struct {
-	ShowUnicodeFlags bool     `json:"show_unicode_flags"`
-	FieldOrder       []string `json:"field_order"`
+	ShowUnicodeFlags bool              `json:"show_unicode_flags"`
+	FieldOrder       []string          `json:"field_order"`        // Discord field order
+	Slack            SlackFormatConfig `json:"slack,omitempty"`    // Slack-specific formatting
+}
+
+// SlackFormatConfig defines Slack-specific formatting options
+type SlackFormatConfig struct {
+	TitleText  string   `json:"title_text"`
+	RSSText    string   `json:"rss_text"`
+	FieldOrder []string `json:"field_order"`
 }
 
 // GeneralConfig represents the main configuration file structure
@@ -75,10 +92,12 @@ type GeneralConfig struct {
 	APIPollInterval string      `json:"api_poll_interval"` // Will be parsed to time.Duration
 	RSSPollInterval string      `json:"rss_poll_interval"`
 	APIStartTime    string      `json:"api_start_time"`
-	RSSRetryCount   int         `json:"rss_retry_count"`
-	RSSRetryDelay   string      `json:"rss_retry_delay"` // Will be parsed to time.Duration
-	DiscordDelay    string      `json:"discord_delay"`   // Will be parsed to time.Duration
-	Webhooks        Webhooks    `json:"webhooks"`
+	RSSRetryCount   int             `json:"rss_retry_count"`
+	RSSRetryDelay   string          `json:"rss_retry_delay"`    // Will be parsed to time.Duration
+	DiscordDelay    string          `json:"discord_delay"`      // Will be parsed to time.Duration
+	DiscordWebhooks DiscordWebhooks `json:"discord_webhooks"`
+	SlackDelay      string          `json:"slack_delay"`        // Will be parsed to time.Duration
+	SlackWebhooks   SlackWebhooks   `json:"slack_webhooks"`
 }
 
 // DefaultConfig returns a configuration with sensible defaults
@@ -98,7 +117,13 @@ func DefaultConfig() *Config {
 		RSSRetryCount:   3,
 		RSSRetryDelay:   2 * time.Second,
 		DiscordDelay:    2 * time.Second, // NEW: Default 2 seconds delay before Discord push
-		Webhooks: Webhooks{
+		DiscordWebhooks: DiscordWebhooks{
+			Ransomware: WebhookConfig{Enabled: false, URL: ""},
+			RSS:        WebhookConfig{Enabled: false, URL: ""},
+			Government: WebhookConfig{Enabled: false, URL: ""},
+		},
+		SlackDelay: 2 * time.Second, // Default 2 seconds delay before Slack push
+		SlackWebhooks: SlackWebhooks{
 			Ransomware: WebhookConfig{Enabled: false, URL: ""},
 			RSS:        WebhookConfig{Enabled: false, URL: ""},
 			Government: WebhookConfig{Enabled: false, URL: ""},

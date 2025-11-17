@@ -1,6 +1,7 @@
 package discord
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -28,6 +29,32 @@ func defangURL(url string) string {
 	}
 
 	return url
+}
+
+// formatTimestamp formats a timestamp string consistently
+// Handles multiple input formats and normalizes to "2006-01-02 15:04:05"
+func formatTimestamp(timestamp string) string {
+	if timestamp == "" {
+		return ""
+	}
+
+	// Try parsing with microseconds
+	if t, err := time.Parse("2006-01-02 15:04:05.999999", timestamp); err == nil {
+		return t.Format("2006-01-02 15:04:05")
+	}
+
+	// Try parsing without microseconds
+	if t, err := time.Parse("2006-01-02 15:04:05", timestamp); err == nil {
+		return t.Format("2006-01-02 15:04:05")
+	}
+
+	// Try parsing ISO 8601 format
+	if t, err := time.Parse(time.RFC3339, timestamp); err == nil {
+		return t.Format("2006-01-02 15:04:05")
+	}
+
+	// Fallback: return as-is if parsing fails
+	return timestamp
 }
 
 const (
@@ -112,36 +139,21 @@ func (w *WebhookSender) createRansomwareField(fieldName string, entry api.Ransom
 
 	case "attackdate":
 		if entry.AttackDate != "" {
-			// Parse the date and reformat it
-			if t, err := time.Parse("2006-01-02 15:04:05.999999", entry.AttackDate); err == nil {
-				// Format without microseconds
-				formattedDate := t.Format("2006-01-02 15:04:05")
-				return &discordgo.MessageEmbedField{
-					Name:   "⚔️ Attack Date",
-					Value:  formattedDate,
-					Inline: true,
-				}
-			} else if _, err := time.Parse("2006-01-02 15:04:05", entry.AttackDate); err == nil {
-				// Already in correct format
-				return &discordgo.MessageEmbedField{
-					Name:   "⚔️ Attack Date",
-					Value:  entry.AttackDate,
-					Inline: true,
-				}
-			} else {
-				// Fallback: use as-is
-				return &discordgo.MessageEmbedField{
-					Name:   "⚔️ Attack Date",
-					Value:  entry.AttackDate,
-					Inline: true,
-				}
+			// Use consistent timestamp formatting
+			formattedDate := formatTimestamp(entry.AttackDate)
+			return &discordgo.MessageEmbedField{
+				Name:   "⚔️ Attack Date",
+				Value:  formattedDate,
+				Inline: true,
 			}
 		}
 
 	case "discovered":
+		// Use consistent timestamp formatting for time.Time
+		formattedDate := entry.Discovered.Format("2006-01-02 15:04:05")
 		return &discordgo.MessageEmbedField{
 			Name:   "🔍 Discovered",
-			Value:  entry.Discovered.Format("2006-01-02 15:04:05"),
+			Value:  formattedDate,
 			Inline: true,
 		}
 
@@ -272,7 +284,7 @@ func (w *WebhookSender) CreateStatusEmbed(title, message string, color int) *dis
 }
 
 // SendStatusMessage sends a status message to a webhook
-func (w *WebhookSender) SendStatusMessage(webhookURL, title, message string) error {
+func (w *WebhookSender) SendStatusMessage(ctx context.Context, webhookURL, title, message string) error {
 	embed := w.CreateStatusEmbed(title, message, 0x00ff00) // Green color for status
 
 	params := &discordgo.WebhookParams{
@@ -284,5 +296,5 @@ func (w *WebhookSender) SendStatusMessage(webhookURL, title, message string) err
 		return fmt.Errorf("invalid webhook URL: %w", err)
 	}
 
-	return w.executeWebhook(webhookID, webhookToken, params)
+	return w.executeWebhook(ctx, webhookID, webhookToken, params)
 }
