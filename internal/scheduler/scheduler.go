@@ -194,7 +194,7 @@ func (s *Scheduler) checkAPIOnce(ctx context.Context) {
 			}).Info("Found unsent API entries for Discord")
 			// Convert StoredRansomwareEntry to api.RansomwareEntry
 			apiEntries := s.convertStoredToAPIEntries(discordUnsent)
-			s.batchSendAPIEntriesToDiscord(ctx, apiEntries, s.config.DiscordWebhooks.Ransomware.URL)
+			s.bulkSendAPIEntriesToDiscord(ctx, apiEntries, s.config.DiscordWebhooks.Ransomware.URL)
 		} else {
 			log.Debug("No unsent Discord items found")
 		}
@@ -216,7 +216,7 @@ func (s *Scheduler) checkAPIOnce(ctx context.Context) {
 			}).Info("Found unsent API entries for Slack")
 			// Convert StoredRansomwareEntry to api.RansomwareEntry
 			apiEntries := s.convertStoredToAPIEntries(slackUnsent)
-			s.batchSendAPIEntriesToSlack(ctx, apiEntries, s.config.SlackWebhooks.Ransomware.URL)
+			s.bulkSendAPIEntriesToSlack(ctx, apiEntries, s.config.SlackWebhooks.Ransomware.URL)
 		} else {
 			log.Debug("No unsent Slack items found")
 		}
@@ -267,36 +267,6 @@ func (s *Scheduler) bulkSendAPIEntriesToDiscord(ctx context.Context, entries []a
 	}).Info("Individual send to Discord completed")
 }
 
-// batchSendAPIEntriesToDiscord sends API entries to Discord in batches (10 per message)
-func (s *Scheduler) batchSendAPIEntriesToDiscord(ctx context.Context, entries []api.RansomwareEntry, webhookURL string) {
-	if len(entries) == 0 {
-		log.Debug("No entries to send")
-		return
-	}
-
-	log.WithField("total_entries", len(entries)).Info("Starting batch send to Discord")
-
-	// Send entries in batches using the new batch method
-	if err := s.discordWebhookSender.SendRansomwareEntriesBatch(ctx, webhookURL, entries, &s.config.Format); err != nil {
-		log.WithError(err).Error("Failed to send ransomware entries batch to Discord")
-		return
-	}
-
-	// Mark all entries as sent after successful transmission
-	successCount := 0
-	for _, entry := range entries {
-		key := s.generateAPIEntryKey(entry)
-		title := entry.Group + " -> " + entry.Victim
-		s.statusTracker.MarkAPIItemSent(key, title, webhookURL)
-		successCount++
-	}
-
-	log.WithFields(log.Fields{
-		"total_sent":    successCount,
-		"total_entries": len(entries),
-	}).Info("Batch send to Discord completed")
-}
-
 // bulkSendAPIEntriesToSlack sends API entries to Slack individually with rate limiting
 func (s *Scheduler) bulkSendAPIEntriesToSlack(ctx context.Context, entries []api.RansomwareEntry, webhookURL string) {
 	if len(entries) == 0 {
@@ -338,36 +308,6 @@ func (s *Scheduler) bulkSendAPIEntriesToSlack(ctx context.Context, entries []api
 		"total_sent":    successCount,
 		"total_entries": len(entries),
 	}).Info("Individual send to Slack completed")
-}
-
-// batchSendAPIEntriesToSlack sends API entries to Slack with rate limiting (batches of 10 for logging)
-func (s *Scheduler) batchSendAPIEntriesToSlack(ctx context.Context, entries []api.RansomwareEntry, webhookURL string) {
-	if len(entries) == 0 {
-		log.Debug("No entries to send")
-		return
-	}
-
-	log.WithField("total_entries", len(entries)).Info("Starting batch send to Slack")
-
-	// Send entries using batch method (still sends individually but with batch tracking)
-	if err := s.slackWebhookSender.SendRansomwareEntriesBatch(ctx, webhookURL, entries, &s.config.Format); err != nil {
-		log.WithError(err).Error("Failed to send ransomware entries batch to Slack")
-		return
-	}
-
-	// Mark all entries as sent after successful transmission
-	successCount := 0
-	for _, entry := range entries {
-		key := s.generateAPIEntryKey(entry)
-		title := entry.Group + " -> " + entry.Victim
-		s.statusTracker.MarkAPIItemSent(key, title, webhookURL)
-		successCount++
-	}
-
-	log.WithFields(log.Fields{
-		"total_sent":    successCount,
-		"total_entries": len(entries),
-	}).Info("Batch send to Slack completed")
 }
 
 // generateAPIEntryKey creates a unique key for an API entry (same logic as in api package)

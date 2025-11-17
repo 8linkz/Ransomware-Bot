@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/sirupsen/logrus"
-	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 // LogRotationConfig contains log rotation settings
@@ -19,48 +18,48 @@ type LogRotationConfig struct {
 }
 
 // NewLogger creates a new logger instance with file and console output
-// Uses lumberjack for automatic log rotation with configurable settings
-func NewLogger(logLevel string, logFilePath string, rotationConfig LogRotationConfig) (*logrus.Logger, error) {
-	logger := logrus.New()
-
-	// Set log level
+// Sets the global logrus logger configuration
+func NewLogger(logLevel string, logFilePath string, rotationConfig LogRotationConfig) error {
+	// Set log level on global logger
 	level, err := parseLogLevel(logLevel)
 	if err != nil {
-		return nil, fmt.Errorf("invalid log level: %w", err)
+		return fmt.Errorf("invalid log level: %w", err)
 	}
-	logger.SetLevel(level)
+	logrus.SetLevel(level)
 
-	// Create lumberjack logger with configurable rotation settings
-	rotatingLogFile := &lumberjack.Logger{
-		Filename:   logFilePath,
-		MaxSize:    rotationConfig.MaxSizeMB,
-		MaxBackups: rotationConfig.MaxBackups,
-		MaxAge:     rotationConfig.MaxAgeDays,
-		Compress:   rotationConfig.Compress,
+	// Open log file with append mode
+	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open log file: %w", err)
 	}
 
 	// Set up multi-writer to write to both file and console
-	multiWriter := io.MultiWriter(os.Stdout, rotatingLogFile)
-	logger.SetOutput(multiWriter)
+	multiWriter := io.MultiWriter(os.Stdout, logFile)
+	logrus.SetOutput(multiWriter)
 
-	// Set custom formatter
-	logger.SetFormatter(&logrus.TextFormatter{
+	// Set custom formatter on global logger
+	logrus.SetFormatter(&logrus.TextFormatter{
 		FullTimestamp:   true,
 		TimestampFormat: "2006-01-02 15:04:05",
 		ForceColors:     false, // Disable colors for file output
 	})
 
 	// Log initial message
-	logger.WithFields(logrus.Fields{
+	logrus.WithFields(logrus.Fields{
 		"level":       logLevel,
 		"log_file":    logFilePath,
 		"max_size":    fmt.Sprintf("%dMB", rotationConfig.MaxSizeMB),
 		"max_backups": rotationConfig.MaxBackups,
 		"max_age":     fmt.Sprintf("%d days", rotationConfig.MaxAgeDays),
 		"compress":    rotationConfig.Compress,
-	}).Info("Logger initialized with configurable rotation")
+	}).Info("Logger initialized with simple file output")
 
-	return logger, nil
+	// Test that file writing works
+	logrus.Info("Testing file write - this should appear in bot.log")
+	logrus.Debug("Debug message test - log level is " + logLevel)
+	logrus.Error("Error message test - logging system active")
+
+	return nil
 }
 
 // parseLogLevel converts string log level to logrus.Level

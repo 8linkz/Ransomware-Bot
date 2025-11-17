@@ -156,12 +156,13 @@ func formatRansomwareMessage(entry api.RansomwareEntry, formatConfig *config.For
 				if urlsSectionAdded {
 					blocks = append(blocks, Block{Type: "divider"})
 				}
+				defanged := defangURL(entry.ClaimURL)
 				urlBlock = &Block{
 					Type: "section",
 					Fields: []TextObject{
 						{
 							Type: "mrkdwn",
-							Text: fmt.Sprintf("*Ransom URL:*\n`%s`", defangURL(entry.ClaimURL)),
+							Text: fmt.Sprintf("*Ransom URL:*\n%s", defanged),
 						},
 					},
 				}
@@ -173,7 +174,7 @@ func formatRansomwareMessage(entry api.RansomwareEntry, formatConfig *config.For
 					Fields: []TextObject{
 						{
 							Type: "mrkdwn",
-							Text: fmt.Sprintf("*Website:*\n<%s|View Website>", entry.URL),
+							Text: fmt.Sprintf("*Website:*\n%s", entry.URL),
 						},
 					},
 				}
@@ -201,12 +202,16 @@ func formatRansomwareMessage(entry api.RansomwareEntry, formatConfig *config.For
 	}
 
 	// Add context footer
+	discoveredTime := "Unknown"
+	if !entry.Discovered.IsZero() {
+		discoveredTime = entry.Discovered.Format("2006-01-02 15:04:05")
+	}
 	blocks = append(blocks, Block{
 		Type: "context",
 		Elements: []TextObject{
 			{
 				Type: "mrkdwn",
-				Text: fmt.Sprintf("Published: %s | Source: ransomware.live", entry.Published.Time.Format("2006-01-02 15:04:05")),
+				Text: fmt.Sprintf("Discovered: %s | Source: ransomware.live", discoveredTime),
 			},
 		},
 	})
@@ -277,27 +282,36 @@ func formatRSSMessage(entry rss.Entry, formatConfig *config.FormatConfig) SlackM
 	}
 
 	// Metadata section
-	fields := []TextObject{}
-
+	// Author section
 	if entry.Author != "" {
-		fields = append(fields, TextObject{
-			Type: "mrkdwn",
-			Text: fmt.Sprintf("*Author:*\n%s", entry.Author),
-		})
-	}
-
-	// Categories
-	if len(entry.Categories) > 0 {
-		fields = append(fields, TextObject{
-			Type: "mrkdwn",
-			Text: fmt.Sprintf("*Categories:*\n%s", strings.Join(entry.Categories, ", ")),
-		})
-	}
-
-	if len(fields) > 0 {
 		blocks = append(blocks, Block{
-			Type:   "section",
-			Fields: fields,
+			Type: "section",
+			Fields: []TextObject{
+				{
+					Type: "mrkdwn",
+					Text: fmt.Sprintf("*Author:*\n%s", entry.Author),
+				},
+			},
+		})
+	}
+
+	// Divider between Author and Categories
+	if entry.Author != "" && len(entry.Categories) > 0 {
+		blocks = append(blocks, Block{
+			Type: "divider",
+		})
+	}
+
+	// Categories section
+	if len(entry.Categories) > 0 {
+		blocks = append(blocks, Block{
+			Type: "section",
+			Fields: []TextObject{
+				{
+					Type: "mrkdwn",
+					Text: fmt.Sprintf("*Categories:*\n%s", strings.Join(entry.Categories, ", ")),
+				},
+			},
 		})
 	}
 
@@ -376,11 +390,10 @@ func truncateText(text string, maxLength int) string {
 	return text[:maxLength-3] + "..."
 }
 
-// defangURL defangs URLs to prevent accidental clicks
-// http://example.com -> hxxp://example[.]com
+// defangURL defangs URLs to prevent accidental clicks (only http/https replacement)
+// http://example.com -> hxxp://example.com
 func defangURL(url string) string {
-	defanged := strings.ReplaceAll(url, "http://", "hxxp://")
-	defanged = strings.ReplaceAll(defanged, "https://", "hxxps://")
-	defanged = strings.ReplaceAll(defanged, ".", "[.]")
+	defanged := strings.ReplaceAll(url, "https://", "hxxps://")
+	defanged = strings.ReplaceAll(defanged, "http://", "hxxp://")
 	return defanged
 }

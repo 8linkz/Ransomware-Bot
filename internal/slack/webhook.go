@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -54,55 +55,6 @@ func (w *WebhookSender) SendRansomwareEntry(ctx context.Context, webhookURL stri
 	return nil
 }
 
-// SendRansomwareEntriesBatch sends multiple ransomware entries as separate messages in sequence
-// Note: Slack doesn't support multiple blocks in one message like Discord's embeds,
-// so we send them as individual messages with rate limiting
-func (w *WebhookSender) SendRansomwareEntriesBatch(ctx context.Context, webhookURL string, entries []api.RansomwareEntry, formatConfig *config.FormatConfig) error {
-	if len(entries) == 0 {
-		return nil
-	}
-
-	// Group entries into batches of 10 for logging/tracking purposes
-	const batchSize = 10
-	totalBatches := (len(entries) + batchSize - 1) / batchSize
-
-	for batchNum := 0; batchNum < totalBatches; batchNum++ {
-		start := batchNum * batchSize
-		end := start + batchSize
-		if end > len(entries) {
-			end = len(entries)
-		}
-
-		batch := entries[start:end]
-
-		// Send each entry in the batch
-		for _, entry := range batch {
-			// Check context before each send
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-
-			payload := formatRansomwareMessage(entry, formatConfig)
-			if err := w.executeWebhook(ctx, webhookURL, payload); err != nil {
-				return fmt.Errorf("failed to send entry in batch %d: %w", batchNum+1, err)
-			}
-
-			// Small delay between messages to avoid rate limiting (handled by scheduler)
-		}
-
-		log.WithFields(log.Fields{
-			"batch":       batchNum + 1,
-			"total_batch": totalBatches,
-			"batch_size":  len(batch),
-			"total":       len(entries),
-		}).Info("Sent ransomware entries batch to Slack")
-	}
-
-	return nil
-}
-
 // SendRSSEntry sends an RSS entry to a Slack webhook
 func (w *WebhookSender) SendRSSEntry(ctx context.Context, webhookURL string, entry rss.Entry, formatConfig *config.FormatConfig) error {
 	// Check if context is cancelled before proceeding
@@ -129,12 +81,16 @@ func (w *WebhookSender) SendRSSEntry(ctx context.Context, webhookURL string, ent
 }
 
 // executeWebhook sends a webhook message to Slack
-func (w *WebhookSender) executeWebhook(ctx context.Context, webhookURL string, payload interface{}) error {
+func (w *WebhookSender) executeWebhook(ctx context.Context, webhookURL string, payload any) error {
 	// Marshal payload to JSON
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("failed to marshal payload: %w", err)
 	}
+
+	// Log the JSON payload at debug level
+	log.WithField("payload_size", len(jsonData)).Debug("Sending Slack webhook request")
+	log.WithField("payload", string(jsonData)).Trace("Slack webhook payload")
 
 	// Create HTTP request with context
 	req, err := http.NewRequestWithContext(ctx, "POST", webhookURL, bytes.NewBuffer(jsonData))
@@ -151,10 +107,36 @@ func (w *WebhookSender) executeWebhook(ctx context.Context, webhookURL string, p
 	}
 	defer resp.Body.Close()
 
+	// Read response body for detailed error information
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		log.WithError(readErr).Warn("Failed to read Slack response body")
+	}
+
 	// Check response status
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("slack webhook returned status %d: %s", resp.StatusCode, resp.Status)
+		// Log the full error details from Slack
+		bodyStr := string(body)
+
+		// Log to console with full details for debugging
+		fmt.Printf("\n=== SLACK WEBHOOK ERROR ===\n")
+		fmt.Printf("Status Code: %d\n", resp.StatusCode)
+		fmt.Printf("Response Body: %s\n", bodyStr)
+		fmt.Printf("Payload Size: %d bytes\n", len(jsonData))
+		fmt.Printf("Payload JSON:\n%s\n", string(jsonData))
+		fmt.Printf("===========================\n\n")
+
+		log.WithFields(log.Fields{
+			"status_code":   resp.StatusCode,
+			"response_body": bodyStr,
+			"payload_size":  len(jsonData),
+		}).Error("Slack webhook request failed")
+
+		return fmt.Errorf("slack webhook returned status %d: %s - response: %s", resp.StatusCode, resp.Status, bodyStr)
 	}
+
+	// Log successful response at debug level
+	log.WithField("response", string(body)).Debug("Slack webhook response")
 
 	return nil
 }
