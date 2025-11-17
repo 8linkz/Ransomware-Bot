@@ -11,6 +11,7 @@ import (
 	"Ransomware-Bot/internal/config"
 	"Ransomware-Bot/internal/discord"
 	"Ransomware-Bot/internal/rss"
+	"Ransomware-Bot/internal/slack"
 	"Ransomware-Bot/internal/status"
 
 	log "github.com/sirupsen/logrus"
@@ -18,11 +19,12 @@ import (
 
 // Scheduler manages the execution of API polling and RSS feed checking
 type Scheduler struct {
-	config        *config.Config
-	apiClient     *api.Client
-	rssParser     *rss.Parser
-	webhookSender *discord.WebhookSender
-	statusTracker *status.Tracker
+	config             *config.Config
+	apiClient          *api.Client
+	rssParser          *rss.Parser
+	discordWebhookSender *discord.WebhookSender
+	slackWebhookSender   *slack.WebhookSender
+	statusTracker      *status.Tracker
 
 	// Channels for graceful shutdown
 	stopChan chan struct{}
@@ -50,16 +52,18 @@ func New(cfg *config.Config) (*Scheduler, error) {
 	// Initialize RSS parser with status tracker for persistent deduplication
 	rssParser := rss.NewParser(cfg.RSSRetryCount, cfg.RSSRetryDelay, statusTracker)
 
-	// Initialize webhook sender
-	webhookSender := discord.NewWebhookSender()
+	// Initialize webhook senders
+	discordWebhookSender := discord.NewWebhookSender()
+	slackWebhookSender := slack.NewWebhookSender()
 
 	return &Scheduler{
-		config:        cfg,
-		apiClient:     apiClient,
-		rssParser:     rssParser,
-		webhookSender: webhookSender,
-		statusTracker: statusTracker,
-		stopChan:      make(chan struct{}),
+		config:               cfg,
+		apiClient:            apiClient,
+		rssParser:            rssParser,
+		discordWebhookSender: discordWebhookSender,
+		slackWebhookSender:   slackWebhookSender,
+		statusTracker:        statusTracker,
+		stopChan:             make(chan struct{}),
 	}, nil
 }
 
@@ -174,77 +178,54 @@ func (s *Scheduler) checkAPIOnce(ctx context.Context) {
 	// Update status with success
 	s.statusTracker.UpdateAPIStatus(true, len(newEntries), "")
 
-	// Get ALL entries that were fetched but not yet sent to Discord (already sorted by storage)
-	allUnsentEntries := s.getAllUnsentAPIEntries()
+	// Send entries individually to Discord (webhook-specific tracking)
+	if s.config.DiscordWebhooks.Ransomware.Enabled {
+		discordUnsent := s.statusTracker.GetUnsentAPIItemsForWebhook(s.config.DiscordWebhooks.Ransomware.URL)
+		log.WithFields(log.Fields{
+			"webhook_enabled": true,
+			"unsent_count":    len(discordUnsent),
+			"total_fetched":   len(newEntries),
+		}).Debug("Checking Discord unsent items")
 
-	if len(allUnsentEntries) == 0 {
-		log.Debug("No unsent API entries found")
-		return
+		if len(discordUnsent) > 0 {
+			log.WithFields(log.Fields{
+				"new_entries":    len(newEntries),
+				"discord_unsent": len(discordUnsent),
+			}).Info("Found unsent API entries for Discord")
+			// Convert StoredRansomwareEntry to api.RansomwareEntry
+			apiEntries := s.convertStoredToAPIEntries(discordUnsent)
+			s.batchSendAPIEntriesToDiscord(ctx, apiEntries, s.config.DiscordWebhooks.Ransomware.URL)
+		} else {
+			log.Debug("No unsent Discord items found")
+		}
 	}
 
-	log.WithFields(log.Fields{
-		"new_entries":  len(newEntries),
-		"total_unsent": len(allUnsentEntries),
-	}).Info("Found unsent API entries")
+	// Send entries individually to Slack (webhook-specific tracking)
+	if s.config.SlackWebhooks.Ransomware.Enabled {
+		slackUnsent := s.statusTracker.GetUnsentAPIItemsForWebhook(s.config.SlackWebhooks.Ransomware.URL)
+		log.WithFields(log.Fields{
+			"webhook_enabled": true,
+			"unsent_count":    len(slackUnsent),
+			"total_fetched":   len(newEntries),
+		}).Debug("Checking Slack unsent items")
 
-	// Send entries individually to Discord (already in correct chronological order)
-	if s.config.Webhooks.Ransomware.Enabled {
-		s.bulkSendAPIEntriesToDiscord(allUnsentEntries, s.config.Webhooks.Ransomware.URL)
-	}
-}
-
-// getAllUnsentAPIEntries returns ALL entries that were fetched but not yet sent to Discord
-// Data is already sorted by discovered time in storage, so no additional sorting needed
-func (s *Scheduler) getAllUnsentAPIEntries() []api.RansomwareEntry {
-	// Get all unsent items from status tracker (stored in chronological order)
-	unsentList := s.statusTracker.GetUnsentAPIItemsSorted()
-
-	var unsentEntries []api.RansomwareEntry
-
-	// Convert StoredRansomwareEntry back to api.RansomwareEntry
-	for _, storedEntry := range unsentList {
-		entry := s.convertStoredToAPIEntry(storedEntry)
-		unsentEntries = append(unsentEntries, entry)
-	}
-
-	log.WithField("unsent_count", len(unsentEntries)).Debug("Retrieved all unsent API entries in chronological order")
-	return unsentEntries
-}
-
-// convertStoredToAPIEntry converts a StoredRansomwareEntry back to api.RansomwareEntry
-func (s *Scheduler) convertStoredToAPIEntry(stored status.StoredRansomwareEntry) api.RansomwareEntry {
-	// Convert stored entry back to API entry format
-	// Note: We need to parse the time strings back to CustomTime
-	discovered, err := time.Parse("2006-01-02 15:04:05.999999", stored.Discovered)
-	if err != nil {
-		// Fallback to simpler format if parsing fails
-		discovered, _ = time.Parse("2006-01-02 15:04:05", stored.Discovered)
-	}
-
-	published, err := time.Parse("2006-01-02 15:04:05.999999", stored.Published)
-	if err != nil {
-		// Fallback to simpler format if parsing fails
-		published, _ = time.Parse("2006-01-02 15:04:05", stored.Published)
-	}
-
-	return api.RansomwareEntry{
-		ID:          stored.ID,
-		Group:       stored.Group,
-		Victim:      stored.Victim,
-		Country:     stored.Country,
-		Activity:    stored.Activity,
-		AttackDate:  stored.AttackDate,
-		Discovered:  api.CustomTime{Time: discovered},
-		ClaimURL:    stored.ClaimURL,
-		URL:         stored.URL,
-		Description: stored.Description,
-		Screenshot:  stored.Screenshot,
-		Published:   api.CustomTime{Time: published},
+		if len(slackUnsent) > 0 {
+			log.WithFields(log.Fields{
+				"new_entries":  len(newEntries),
+				"slack_unsent": len(slackUnsent),
+			}).Info("Found unsent API entries for Slack")
+			// Convert StoredRansomwareEntry to api.RansomwareEntry
+			apiEntries := s.convertStoredToAPIEntries(slackUnsent)
+			s.batchSendAPIEntriesToSlack(ctx, apiEntries, s.config.SlackWebhooks.Ransomware.URL)
+		} else {
+			log.Debug("No unsent Slack items found")
+		}
 	}
 }
+
 
 // bulkSendAPIEntriesToDiscord sends API entries to Discord individually with rate limiting
-func (s *Scheduler) bulkSendAPIEntriesToDiscord(entries []api.RansomwareEntry, webhookURL string) {
+func (s *Scheduler) bulkSendAPIEntriesToDiscord(ctx context.Context, entries []api.RansomwareEntry, webhookURL string) {
 	if len(entries) == 0 {
 		log.Debug("No entries to send")
 		return
@@ -255,10 +236,18 @@ func (s *Scheduler) bulkSendAPIEntriesToDiscord(entries []api.RansomwareEntry, w
 	// Send each entry individually with configurable delay
 	successCount := 0
 	for _, entry := range entries {
+		// Check if context is cancelled
+		select {
+		case <-ctx.Done():
+			log.WithField("sent", successCount).Warn("Context cancelled, stopping Discord send")
+			return
+		default:
+		}
+
 		// Configurable delay before sending to Discord
 		time.Sleep(s.config.DiscordDelay)
 		// Send the entry to Discord webhook
-		if err := s.webhookSender.SendRansomwareEntry(webhookURL, entry, &s.config.Format); err != nil {
+		if err := s.discordWebhookSender.SendRansomwareEntry(ctx, webhookURL, entry, &s.config.Format); err != nil {
 			log.WithError(err).WithFields(log.Fields{
 				"group":  entry.Group,
 				"victim": entry.Victim,
@@ -276,6 +265,109 @@ func (s *Scheduler) bulkSendAPIEntriesToDiscord(entries []api.RansomwareEntry, w
 		"total_sent":    successCount,
 		"total_entries": len(entries),
 	}).Info("Individual send to Discord completed")
+}
+
+// batchSendAPIEntriesToDiscord sends API entries to Discord in batches (10 per message)
+func (s *Scheduler) batchSendAPIEntriesToDiscord(ctx context.Context, entries []api.RansomwareEntry, webhookURL string) {
+	if len(entries) == 0 {
+		log.Debug("No entries to send")
+		return
+	}
+
+	log.WithField("total_entries", len(entries)).Info("Starting batch send to Discord")
+
+	// Send entries in batches using the new batch method
+	if err := s.discordWebhookSender.SendRansomwareEntriesBatch(ctx, webhookURL, entries, &s.config.Format); err != nil {
+		log.WithError(err).Error("Failed to send ransomware entries batch to Discord")
+		return
+	}
+
+	// Mark all entries as sent after successful transmission
+	successCount := 0
+	for _, entry := range entries {
+		key := s.generateAPIEntryKey(entry)
+		title := entry.Group + " -> " + entry.Victim
+		s.statusTracker.MarkAPIItemSent(key, title, webhookURL)
+		successCount++
+	}
+
+	log.WithFields(log.Fields{
+		"total_sent":    successCount,
+		"total_entries": len(entries),
+	}).Info("Batch send to Discord completed")
+}
+
+// bulkSendAPIEntriesToSlack sends API entries to Slack individually with rate limiting
+func (s *Scheduler) bulkSendAPIEntriesToSlack(ctx context.Context, entries []api.RansomwareEntry, webhookURL string) {
+	if len(entries) == 0 {
+		log.Debug("No entries to send")
+		return
+	}
+
+	log.WithField("total_entries", len(entries)).Info("Starting individual send to Slack")
+
+	// Send each entry individually with configurable delay
+	successCount := 0
+	for _, entry := range entries {
+		// Check if context is cancelled
+		select {
+		case <-ctx.Done():
+			log.WithField("sent", successCount).Warn("Context cancelled, stopping Slack send")
+			return
+		default:
+		}
+
+		// Configurable delay before sending to Slack
+		time.Sleep(s.config.SlackDelay)
+		// Send the entry to Slack webhook
+		if err := s.slackWebhookSender.SendRansomwareEntry(ctx, webhookURL, entry, &s.config.Format); err != nil {
+			log.WithError(err).WithFields(log.Fields{
+				"group":  entry.Group,
+				"victim": entry.Victim,
+			}).Error("Failed to send ransomware entry to Slack webhook")
+		} else {
+			// Mark as sent after successful transmission
+			key := s.generateAPIEntryKey(entry)
+			title := entry.Group + " -> " + entry.Victim
+			s.statusTracker.MarkAPIItemSent(key, title, webhookURL)
+			successCount++
+		}
+	}
+
+	log.WithFields(log.Fields{
+		"total_sent":    successCount,
+		"total_entries": len(entries),
+	}).Info("Individual send to Slack completed")
+}
+
+// batchSendAPIEntriesToSlack sends API entries to Slack with rate limiting (batches of 10 for logging)
+func (s *Scheduler) batchSendAPIEntriesToSlack(ctx context.Context, entries []api.RansomwareEntry, webhookURL string) {
+	if len(entries) == 0 {
+		log.Debug("No entries to send")
+		return
+	}
+
+	log.WithField("total_entries", len(entries)).Info("Starting batch send to Slack")
+
+	// Send entries using batch method (still sends individually but with batch tracking)
+	if err := s.slackWebhookSender.SendRansomwareEntriesBatch(ctx, webhookURL, entries, &s.config.Format); err != nil {
+		log.WithError(err).Error("Failed to send ransomware entries batch to Slack")
+		return
+	}
+
+	// Mark all entries as sent after successful transmission
+	successCount := 0
+	for _, entry := range entries {
+		key := s.generateAPIEntryKey(entry)
+		title := entry.Group + " -> " + entry.Victim
+		s.statusTracker.MarkAPIItemSent(key, title, webhookURL)
+		successCount++
+	}
+
+	log.WithFields(log.Fields{
+		"total_sent":    successCount,
+		"total_entries": len(entries),
+	}).Info("Batch send to Slack completed")
 }
 
 // generateAPIEntryKey creates a unique key for an API entry (same logic as in api package)
@@ -306,19 +398,34 @@ func (s *Scheduler) generateAPIEntryKey(entry api.RansomwareEntry) string {
 func (s *Scheduler) checkRSSOnce(ctx context.Context) {
 	log.Debug("Checking RSS feeds for new entries")
 
-	// Check general feeds
-	if s.config.Webhooks.RSS.Enabled && len(s.config.Feeds.GeneralFeeds) > 0 {
-		s.checkRSSFeeds(ctx, s.config.Feeds.GeneralFeeds, s.config.Webhooks.RSS.URL, "general")
+	// Check general feeds for Discord
+	if s.config.DiscordWebhooks.RSS.Enabled && len(s.config.Feeds.GeneralFeeds) > 0 {
+		s.checkRSSFeeds(ctx, s.config.Feeds.GeneralFeeds, s.config.DiscordWebhooks.RSS.URL, "general", "discord")
 	}
 
-	// Check government feeds
-	if s.config.Webhooks.Government.Enabled && len(s.config.Feeds.GovernmentFeeds) > 0 {
-		s.checkRSSFeeds(ctx, s.config.Feeds.GovernmentFeeds, s.config.Webhooks.Government.URL, "government")
+	// Check government feeds for Discord
+	if s.config.DiscordWebhooks.Government.Enabled && len(s.config.Feeds.GovernmentFeeds) > 0 {
+		s.checkRSSFeeds(ctx, s.config.Feeds.GovernmentFeeds, s.config.DiscordWebhooks.Government.URL, "government", "discord")
 	}
 
-	// Check ransomware feeds
-	if s.config.Webhooks.Ransomware.Enabled && len(s.config.Feeds.RansomwareFeeds) > 0 {
-		s.checkRSSFeeds(ctx, s.config.Feeds.RansomwareFeeds, s.config.Webhooks.Ransomware.URL, "ransomware")
+	// Check ransomware feeds for Discord
+	if s.config.DiscordWebhooks.Ransomware.Enabled && len(s.config.Feeds.RansomwareFeeds) > 0 {
+		s.checkRSSFeeds(ctx, s.config.Feeds.RansomwareFeeds, s.config.DiscordWebhooks.Ransomware.URL, "ransomware", "discord")
+	}
+
+	// Check general feeds for Slack
+	if s.config.SlackWebhooks.RSS.Enabled && len(s.config.Feeds.GeneralFeeds) > 0 {
+		s.checkRSSFeeds(ctx, s.config.Feeds.GeneralFeeds, s.config.SlackWebhooks.RSS.URL, "general", "slack")
+	}
+
+	// Check government feeds for Slack
+	if s.config.SlackWebhooks.Government.Enabled && len(s.config.Feeds.GovernmentFeeds) > 0 {
+		s.checkRSSFeeds(ctx, s.config.Feeds.GovernmentFeeds, s.config.SlackWebhooks.Government.URL, "government", "slack")
+	}
+
+	// Check ransomware feeds for Slack
+	if s.config.SlackWebhooks.Ransomware.Enabled && len(s.config.Feeds.RansomwareFeeds) > 0 {
+		s.checkRSSFeeds(ctx, s.config.Feeds.RansomwareFeeds, s.config.SlackWebhooks.Ransomware.URL, "ransomware", "slack")
 	}
 
 	// Check for unsent RSS items and send them (Recovery Phase)
@@ -343,7 +450,7 @@ func (s *Scheduler) sendUnsentRSSItems(ctx context.Context) {
 		return
 	}
 
-	log.WithField("unsent_count", len(unsentRSSItems)).Info("Found unsent RSS items, sending to Discord")
+	log.WithField("unsent_count", len(unsentRSSItems)).Info("Found unsent RSS items, sending to webhooks")
 
 	// Group by feed type for correct webhook routing
 	generalItems := []status.StoredRSSEntry{}
@@ -361,17 +468,30 @@ func (s *Scheduler) sendUnsentRSSItems(ctx context.Context) {
 		}
 	}
 
-	// Send to appropriate webhooks
-	if len(generalItems) > 0 && s.config.Webhooks.RSS.Enabled {
-		s.sendRSSItemsToDiscord(generalItems, s.config.Webhooks.RSS.URL, "general")
+	// Send to appropriate Discord webhooks
+	if len(generalItems) > 0 && s.config.DiscordWebhooks.RSS.Enabled {
+		s.sendRSSItemsToWebhook(ctx, generalItems, s.config.DiscordWebhooks.RSS.URL, "general", "discord")
 	}
 
-	if len(governmentItems) > 0 && s.config.Webhooks.Government.Enabled {
-		s.sendRSSItemsToDiscord(governmentItems, s.config.Webhooks.Government.URL, "government")
+	if len(governmentItems) > 0 && s.config.DiscordWebhooks.Government.Enabled {
+		s.sendRSSItemsToWebhook(ctx, governmentItems, s.config.DiscordWebhooks.Government.URL, "government", "discord")
 	}
 
-	if len(ransomwareItems) > 0 && s.config.Webhooks.Ransomware.Enabled {
-		s.sendRSSItemsToDiscord(ransomwareItems, s.config.Webhooks.Ransomware.URL, "ransomware")
+	if len(ransomwareItems) > 0 && s.config.DiscordWebhooks.Ransomware.Enabled {
+		s.sendRSSItemsToWebhook(ctx, ransomwareItems, s.config.DiscordWebhooks.Ransomware.URL, "ransomware", "discord")
+	}
+
+	// Send to appropriate Slack webhooks
+	if len(generalItems) > 0 && s.config.SlackWebhooks.RSS.Enabled {
+		s.sendRSSItemsToWebhook(ctx, generalItems, s.config.SlackWebhooks.RSS.URL, "general", "slack")
+	}
+
+	if len(governmentItems) > 0 && s.config.SlackWebhooks.Government.Enabled {
+		s.sendRSSItemsToWebhook(ctx, governmentItems, s.config.SlackWebhooks.Government.URL, "government", "slack")
+	}
+
+	if len(ransomwareItems) > 0 && s.config.SlackWebhooks.Ransomware.Enabled {
+		s.sendRSSItemsToWebhook(ctx, ransomwareItems, s.config.SlackWebhooks.Ransomware.URL, "ransomware", "slack")
 	}
 }
 
@@ -405,8 +525,8 @@ func (s *Scheduler) isRansomwareFeed(feedURL string) bool {
 	return false
 }
 
-// sendRSSItemsToDiscord sends RSS items to Discord with Phase 2 tracking
-func (s *Scheduler) sendRSSItemsToDiscord(items []status.StoredRSSEntry, webhookURL string, feedType string) {
+// sendRSSItemsToWebhook sends RSS items to a webhook (Discord or Slack) with Phase 2 tracking
+func (s *Scheduler) sendRSSItemsToWebhook(ctx context.Context, items []status.StoredRSSEntry, webhookURL string, feedType string, messenger string) {
 	if len(items) == 0 {
 		log.Debug("No RSS items to send")
 		return
@@ -415,20 +535,43 @@ func (s *Scheduler) sendRSSItemsToDiscord(items []status.StoredRSSEntry, webhook
 	log.WithFields(log.Fields{
 		"total_items": len(items),
 		"feed_type":   feedType,
-	}).Info("Starting RSS items send to Discord")
+		"messenger":   messenger,
+	}).Info("Starting RSS items send to webhook")
 
 	successCount := 0
 	for _, storedItem := range items {
+		// Check if context is cancelled
+		select {
+		case <-ctx.Done():
+			log.WithFields(log.Fields{
+				"sent":      successCount,
+				"messenger": messenger,
+			}).Warn("Context cancelled, stopping RSS send")
+			return
+		default:
+		}
+
 		// Convert stored RSS entry back to rss.Entry for sending
 		rssEntry := s.convertStoredToRSSEntry(storedItem)
 
-		// Configurable delay before sending to Discord
-		time.Sleep(s.config.DiscordDelay)
+		var err error
 
-		if err := s.webhookSender.SendRSSEntry(webhookURL, rssEntry); err != nil {
+		switch messenger {
+		case "discord":
+			// Configurable delay before sending to Discord
+			time.Sleep(s.config.DiscordDelay)
+			err = s.discordWebhookSender.SendRSSEntry(ctx, webhookURL, rssEntry)
+		case "slack":
+			// Configurable delay before sending to Slack
+			time.Sleep(s.config.SlackDelay)
+			err = s.slackWebhookSender.SendRSSEntry(ctx, webhookURL, rssEntry, &s.config.Format)
+		}
+
+		if err != nil {
 			log.WithError(err).WithFields(log.Fields{
-				"title":    storedItem.Title,
-				"feed_url": storedItem.FeedURL,
+				"title":     storedItem.Title,
+				"feed_url":  storedItem.FeedURL,
+				"messenger": messenger,
 			}).Error("Failed to send RSS entry to webhook")
 		} else {
 			// Mark as sent after successful transmission (Phase 2)
@@ -441,7 +584,8 @@ func (s *Scheduler) sendRSSItemsToDiscord(items []status.StoredRSSEntry, webhook
 		"total_sent":  successCount,
 		"total_items": len(items),
 		"feed_type":   feedType,
-	}).Info("RSS items send to Discord completed")
+		"messenger":   messenger,
+	}).Info("RSS items send to webhook completed")
 }
 
 // convertStoredToRSSEntry converts a StoredRSSEntry back to rss.Entry for Discord sending
@@ -467,7 +611,7 @@ func (s *Scheduler) convertStoredToRSSEntry(stored status.StoredRSSEntry) rss.En
 }
 
 // checkRSSFeeds checks a specific set of RSS feeds with worker pool limiting
-func (s *Scheduler) checkRSSFeeds(ctx context.Context, feedURLs []string, webhookURL string, feedType string) {
+func (s *Scheduler) checkRSSFeeds(ctx context.Context, feedURLs []string, webhookURL string, feedType string, messenger string) {
 	if len(feedURLs) == 0 {
 		log.WithField("feed_type", feedType).Debug("No RSS feeds configured")
 		return
@@ -476,6 +620,7 @@ func (s *Scheduler) checkRSSFeeds(ctx context.Context, feedURLs []string, webhoo
 	log.WithFields(log.Fields{
 		"feed_count":  len(feedURLs),
 		"feed_type":   feedType,
+		"messenger":   messenger,
 		"max_workers": s.config.MaxRSSWorkers,
 	}).Debug("Checking RSS feeds with worker pool")
 
@@ -509,11 +654,32 @@ func (s *Scheduler) checkRSSFeeds(ctx context.Context, feedURLs []string, webhoo
 
 		// Send entries to webhook in chronological order with configurable delay
 		for _, entry := range entries {
-			// Configurable delay before sending to Discord
-			time.Sleep(s.config.DiscordDelay)
+			// Check if context is cancelled
+			select {
+			case <-ctx.Done():
+				log.WithField("messenger", messenger).Warn("Context cancelled, stopping RSS entry send")
+				return
+			default:
+			}
 
-			if err := s.webhookSender.SendRSSEntry(webhookURL, entry); err != nil {
-				log.WithError(err).WithField("feed_url", feedURL).Error("Failed to send RSS entry to webhook")
+			var err error
+
+			switch messenger {
+			case "discord":
+				// Configurable delay before sending to Discord
+				time.Sleep(s.config.DiscordDelay)
+				err = s.discordWebhookSender.SendRSSEntry(ctx, webhookURL, entry)
+			case "slack":
+				// Configurable delay before sending to Slack
+				time.Sleep(s.config.SlackDelay)
+				err = s.slackWebhookSender.SendRSSEntry(ctx, webhookURL, entry, &s.config.Format)
+			}
+
+			if err != nil {
+				log.WithError(err).WithFields(log.Fields{
+					"feed_url":  feedURL,
+					"messenger": messenger,
+				}).Error("Failed to send RSS entry to webhook")
 			} else {
 				// Mark as sent after successful transmission (Phase 2 for new entries)
 				key := s.generateRSSEntryKey(feedURL, entry)
@@ -530,6 +696,75 @@ func (s *Scheduler) checkRSSFeeds(ctx context.Context, feedURLs []string, webhoo
 		"total_entries": totalNewEntries,
 		"workers_used":  s.config.MaxRSSWorkers,
 	}).Info("RSS feed processing completed with worker pool")
+}
+
+// convertStoredToAPIEntries converts []status.StoredRansomwareEntry to []api.RansomwareEntry
+func (s *Scheduler) convertStoredToAPIEntries(stored []status.StoredRansomwareEntry) []api.RansomwareEntry {
+	result := make([]api.RansomwareEntry, 0, len(stored))
+
+	for _, entry := range stored {
+		// Parse discovered time with proper error handling
+		var discovered time.Time
+		if entry.Discovered != "" {
+			var err error
+			discovered, err = time.Parse("2006-01-02 15:04:05.999999", entry.Discovered)
+			if err != nil {
+				// Try without microseconds
+				discovered, err = time.Parse("2006-01-02 15:04:05", entry.Discovered)
+				if err != nil {
+					// Log error and use current time as fallback
+					log.WithFields(log.Fields{
+						"discovered": entry.Discovered,
+						"group":      entry.Group,
+						"victim":     entry.Victim,
+					}).Warn("Failed to parse discovered time, using current time")
+					discovered = time.Now()
+				}
+			}
+		} else {
+			// Empty string - use current time
+			discovered = time.Now()
+		}
+
+		// Parse published time with proper error handling
+		var published time.Time
+		if entry.Published != "" {
+			var err error
+			published, err = time.Parse("2006-01-02 15:04:05.999999", entry.Published)
+			if err != nil {
+				// Try without microseconds
+				published, err = time.Parse("2006-01-02 15:04:05", entry.Published)
+				if err != nil {
+					// Log error and leave as zero time
+					log.WithFields(log.Fields{
+						"published": entry.Published,
+						"group":     entry.Group,
+						"victim":    entry.Victim,
+					}).Warn("Failed to parse published time, leaving empty")
+					// published remains zero time
+				}
+			}
+		}
+
+		apiEntry := api.RansomwareEntry{
+			ID:          entry.ID,
+			Group:       entry.Group,
+			Victim:      entry.Victim,
+			Country:     entry.Country,
+			Activity:    entry.Activity,
+			AttackDate:  entry.AttackDate,
+			Discovered:  api.CustomTime{Time: discovered},
+			ClaimURL:    entry.ClaimURL,
+			URL:         entry.URL,
+			Description: entry.Description,
+			Screenshot:  entry.Screenshot,
+			Published:   api.CustomTime{Time: published},
+		}
+
+		result = append(result, apiEntry)
+	}
+
+	return result
 }
 
 // generateRSSEntryKey creates a unique key for an RSS entry (same logic as in rss package)
