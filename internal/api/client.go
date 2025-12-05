@@ -167,3 +167,12 @@ func (c *Client) logRequest(url string, duration time.Duration, err error) {
 		log.WithFields(fields).Debug("API request successful")
 	}
 }
+
+// Close closes the HTTP client and cleans up idle connections
+// Should be called during application shutdown
+func (c *Client) Close() error {
+	if transport, ok := c.httpClient.Transport.(*http.Transport); ok {
+		transport.CloseIdleConnections()
+	}
+	return nil
+}

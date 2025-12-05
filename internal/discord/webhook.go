@@ -1,8 +1,11 @@
 package discord
 
 import (
+	"context"
 	"fmt"
+	"net/http"
 	"strings"
+	"time"
 
 	"Ransomware-Bot/internal/api"
 	"Ransomware-Bot/internal/config"
@@ -26,13 +29,25 @@ func NewWebhookSender() *WebhookSender {
 		log.WithError(err).Fatal("Failed to create Discord session, webhook operations may be limited")
 	}
 
+	// Configure HTTP client with timeout to prevent hanging requests
+	session.Client = &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
 	return &WebhookSender{
 		session: session,
 	}
 }
 
 // SendRansomwareEntry sends a ransomware entry to a Discord webhook
-func (w *WebhookSender) SendRansomwareEntry(webhookURL string, entry api.RansomwareEntry, formatConfig *config.FormatConfig) error {
+func (w *WebhookSender) SendRansomwareEntry(ctx context.Context, webhookURL string, entry api.RansomwareEntry, formatConfig *config.FormatConfig) error {
+	// Check if context is cancelled before proceeding
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	// Format the entry as a Discord embed
 	embed := w.formatRansomwareEmbed(entry, formatConfig)
 
@@ -48,7 +63,7 @@ func (w *WebhookSender) SendRansomwareEntry(webhookURL string, entry api.Ransomw
 	}
 
 	// Send the webhook
-	if err := w.executeWebhook(webhookID, webhookToken, params); err != nil {
+	if err := w.executeWebhook(ctx, webhookID, webhookToken, params); err != nil {
 		return fmt.Errorf("failed to send ransomware entry: %w", err)
 	}
 
@@ -61,7 +76,14 @@ func (w *WebhookSender) SendRansomwareEntry(webhookURL string, entry api.Ransomw
 }
 
 // SendRSSEntry sends an RSS entry to a Discord webhook
-func (w *WebhookSender) SendRSSEntry(webhookURL string, entry rss.Entry) error {
+func (w *WebhookSender) SendRSSEntry(ctx context.Context, webhookURL string, entry rss.Entry) error {
+	// Check if context is cancelled before proceeding
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	// Format the entry as a Discord embed
 	embed := w.formatRSSEmbed(entry)
 
@@ -77,7 +99,7 @@ func (w *WebhookSender) SendRSSEntry(webhookURL string, entry rss.Entry) error {
 	}
 
 	// Send the webhook
-	if err := w.executeWebhook(webhookID, webhookToken, params); err != nil {
+	if err := w.executeWebhook(ctx, webhookID, webhookToken, params); err != nil {
 		return fmt.Errorf("failed to send RSS entry: %w", err)
 	}
 
@@ -90,11 +112,19 @@ func (w *WebhookSender) SendRSSEntry(webhookURL string, entry rss.Entry) error {
 }
 
 // executeWebhook sends a webhook message to Discord
-func (w *WebhookSender) executeWebhook(webhookID, webhookToken string, params *discordgo.WebhookParams) error {
+func (w *WebhookSender) executeWebhook(ctx context.Context, webhookID, webhookToken string, params *discordgo.WebhookParams) error {
 	if w.session == nil {
 		return fmt.Errorf("discord session not available")
 	}
 
+	// Check context before executing
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	// Note: discordgo doesn't support context natively, but we check before sending
 	_, err := w.session.WebhookExecute(webhookID, webhookToken, false, params)
 	return err
 }

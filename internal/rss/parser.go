@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mmcdole/gofeed"
@@ -62,6 +63,7 @@ type workerPool struct {
 	jobs       chan string
 	results    chan feedResult
 	parser     *Parser
+	wg         sync.WaitGroup
 }
 
 // NewParser creates a new RSS parser with retry configuration
@@ -227,7 +229,8 @@ func getAuthorName(item *gofeed.Item) string {
 // getPublishedDate safely extracts publication date from RSS item
 func getPublishedDate(item *gofeed.Item) time.Time {
 	if item == nil {
-		return time.Now()
+		log.Warn("Nil RSS item, using zero time for published date")
+		return time.Time{} // Zero time instead of time.Now()
 	}
 
 	// Prefer parsed published date
@@ -240,8 +243,13 @@ func getPublishedDate(item *gofeed.Item) time.Time {
 		return *item.UpdatedParsed
 	}
 
-	// Fallback to current time if no date is available
-	return time.Now()
+	// Fallback to zero time if no date is available
+	// This prevents false chronological ordering
+	log.WithFields(log.Fields{
+		"title": item.Title,
+		"link":  item.Link,
+	}).Debug("RSS item has no published or updated date, using zero time")
+	return time.Time{}
 }
 
 // safeString returns empty string if input is nil or empty
@@ -286,6 +294,8 @@ func newWorkerPool(maxWorkers int, parser *Parser) *workerPool {
 
 // worker processes RSS feeds from the jobs channel
 func (wp *workerPool) worker(ctx context.Context) {
+	defer wp.wg.Done() // Signal completion when worker exits
+
 	for {
 		select {
 		case url, ok := <-wp.jobs:
@@ -296,10 +306,13 @@ func (wp *workerPool) worker(ctx context.Context) {
 			// Process the RSS feed
 			entries, err := wp.parser.ParseFeed(ctx, url)
 
-			// Send result back
+			// Send result back with timeout to prevent goroutine leak
 			select {
 			case wp.results <- feedResult{url: url, entries: entries, err: err}:
 			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+				log.WithField("url", url).Warn("Worker timed out sending result, channel may be blocked")
 				return
 			}
 
@@ -315,10 +328,17 @@ func (wp *workerPool) processFeeds(ctx context.Context, feedURLs []string) (map[
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel() // Always cancel workers when returning
 
-	// Start workers
+	// Start workers with WaitGroup tracking
 	for i := 0; i < wp.maxWorkers; i++ {
+		wp.wg.Add(1)
 		go wp.worker(workerCtx)
 	}
+
+	// Goroutine to close results channel after all workers finish
+	go func() {
+		wp.wg.Wait()
+		close(wp.results)
+	}()
 
 	// Send all jobs
 	go func() {
@@ -338,7 +358,12 @@ func (wp *workerPool) processFeeds(ctx context.Context, feedURLs []string) (map[
 
 	for i := 0; i < len(feedURLs); i++ {
 		select {
-		case result := <-wp.results:
+		case result, ok := <-wp.results:
+			if !ok {
+				// Channel closed - all workers finished
+				log.WithField("collected", i).Warn("Results channel closed before collecting all results")
+				return results, fmt.Errorf("collected %d of %d feeds before workers finished", i, len(feedURLs))
+			}
 			if result.err != nil {
 				errors = append(errors, fmt.Errorf("failed to parse %s: %w", result.url, result.err))
 				// Include failed feeds with empty results for status tracking
@@ -353,6 +378,21 @@ func (wp *workerPool) processFeeds(ctx context.Context, feedURLs []string) (map[
 			log.WithField("remaining_feeds", len(feedURLs)-i).Error("Worker pool timeout waiting for feed results")
 			// Cancel workers before returning to prevent goroutine leak
 			cancel()
+
+			// Wait for workers to finish with a timeout
+			waitDone := make(chan struct{})
+			go func() {
+				wp.wg.Wait()
+				close(waitDone)
+			}()
+
+			select {
+			case <-waitDone:
+				log.Info("All workers shut down cleanly after timeout")
+			case <-time.After(5 * time.Second):
+				log.Warn("Some workers did not shut down within 5 seconds after timeout")
+			}
+
 			// Return partial results instead of failing completely
 			return results, fmt.Errorf("worker pool timeout after processing %d of %d feeds", i, len(feedURLs))
 		}
@@ -360,10 +400,13 @@ func (wp *workerPool) processFeeds(ctx context.Context, feedURLs []string) (map[
 
 	// Log any errors but don't fail completely
 	if len(errors) > 0 {
-		log.WithField("error_count", len(errors)).Warn("Some RSS feeds failed to parse with worker pool")
-		for _, err := range errors {
-			log.WithError(err).Error("RSS worker pool parsing error")
+		// Aggregate errors efficiently using strings.Builder
+		var errorMsg strings.Builder
+		errorMsg.WriteString(fmt.Sprintf("Some RSS feeds failed to parse (%d errors):\n", len(errors)))
+		for i, err := range errors {
+			errorMsg.WriteString(fmt.Sprintf("  %d. %v\n", i+1, err))
 		}
+		log.Warn(errorMsg.String())
 	}
 
 	return results, nil

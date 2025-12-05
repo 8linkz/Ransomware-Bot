@@ -1,6 +1,7 @@
 # Ransomware Bot
 
-A high-performance Discord bot written in **Go** that delivers threat intelligence data via Discord webhooks. The bot fetches data from the ransomware.live API and multiple RSS feeds, providing regular cybersecurity alerts to your Discord channels.
+A high-performance bot written in **Go** that delivers ransomware alerts via **Discord** and **Slack** webhooks. The bot fetches data from the ransomware.live API and multiple RSS feeds, providing regular cybersecurity updates to your communication channels.
+
 The original bot from vx-underground no longer works, so I built a new one (https://github.com/vxunderground/ThreatIntelligenceDiscordBot).
 
 ⚠️ Disclaimer
@@ -14,13 +15,23 @@ This bot is 100% vibe-coded - I provide no guarantee for 100% security.
 The ransomware.live API allows **3,000 calls per day** (API Pro). You need to request an API key at: https://www.ransomware.live/api
 
 ### Discord Webhooks
-To create Discord webhooks on your own Discord server:
+To create Discord webhooks:
 1. Go to your Discord server settings
 2. Navigate to "Integrations" → "Webhooks"
 3. Click "Create Webhook"
 4. Choose the channel and copy the webhook URL
+5. Add the URL to the configuration (see Configuration section below)
 
-⚠️ **Security Warning**: Never share your webhook URLs with others - they provide direct access to post messages in your Discord channels.
+### Slack Webhooks
+To create Slack webhooks:
+1. Go to https://api.slack.com/apps
+2. Create a new app or select an existing one
+3. Navigate to "Incoming Webhooks" and activate it
+4. Click "Add New Webhook to Workspace"
+5. Select the channel and copy the webhook URL
+6. Add the URL to the configuration (see Configuration section below)
+
+⚠️ **Security Warning**: Never share your webhook URLs with others - they provide direct access to post messages in your channels.
 
 ## ⚙️ Configuration
 
@@ -35,14 +46,15 @@ To create Discord webhooks on your own Discord server:
     "max_age_days": 7,
     "compress": true
   },
+  "max_rss_workers": 5,
   "api_key": "YOUR_RANSOMWARE_LIVE_API_KEY",
   "api_poll_interval": "1h",
-  "rss_poll_interval": "30m",
   "api_start_time": "",
+  "rss_poll_interval": "30m",
   "rss_retry_count": 3,
   "rss_retry_delay": "2s",
   "discord_delay": "2s",
-  "webhooks": {
+  "discord_webhooks": {
     "ransomware": {
       "enabled": true,
       "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
@@ -54,6 +66,21 @@ To create Discord webhooks on your own Discord server:
     "government": {
       "enabled": false,
       "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
+    }
+  },
+  "slack_delay": "2s",
+  "slack_webhooks": {
+    "ransomware": {
+      "enabled": true,
+      "url": "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
+    },
+    "rss": {
+      "enabled": true,
+      "url": "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
+    },
+    "government": {
+      "enabled": false,
+      "url": "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
     }
   }
 }
@@ -67,9 +94,18 @@ To create Discord webhooks on your own Discord server:
 | `api_key` | Ransomware.live API key | `"your-api-key-here"` |
 | `api_poll_interval` | API checking frequency | `"1h"`, `"30m"`, `"15m"` |
 | `rss_poll_interval` | RSS checking frequency | `"30m"`, `"15m"`, `"5m"` |
-| `discord_delay` | Delay before Discord push | `"2s"`, `"1s"`, `"500ms"` |
+| `max_rss_workers` | Concurrent RSS feed workers | `5`, `10`, `20` |
+| `discord_delay` | Delay between Discord messages | `"2s"`, `"1s"`, `"500ms"` |
+| `slack_delay` | Delay between Slack messages | `"2s"`, `"1s"`, `"500ms"` |
 | `rss_retry_count` | Failed feed retry attempts | `3`, `5`, `10` |
 | `rss_retry_delay` | Delay between retries | `"2s"`, `"5s"`, `"10s"` |
+
+**Webhook Configuration:**
+- Both Discord and Slack support three separate webhooks for different alert types
+- `ransomware` - Alerts from ransomware.live API
+- `rss` - General cybersecurity RSS feeds
+- `government` - Government agency alerts (CISA, NCSC, etc.)
+- Each webhook can be independently enabled/disabled
 
 
 ### 2. RSS Feeds Configuration (configs/config_feeds.json)
@@ -111,22 +147,43 @@ To create Discord webhooks on your own Discord server:
   "show_unicode_flags": true,
   "field_order": [
     "victim",
-    "activity", 
+    "activity",
     "country",
     "website",
     "group",
     "discovered",
     "attackdate",
-    "description"
-  ]
+    "description",
+    "screenshot",
+    "post_url"
+  ],
+  "slack": {
+    "title_text": "Ransomware Alert",
+    "rss_text": "RSS Feed Update",
+    "field_order": [
+      "group",
+      "victim",
+      "country",
+      "activity",
+      "attackdate",
+      "discovered",
+      "screenshot",
+      "post_url",
+      "website",
+      "description"
+    ]
+  }
 }
 ```
 
 **Formatting Options:**
 - `show_unicode_flags` - Display country flag emojis (🇺🇸, 🇩🇪, etc.)
-- `field_order` - Customizable order of fields in Discord messages
+- `field_order` - Field order for Discord messages
+- `slack.title_text` - Custom title for Slack ransomware alerts
+- `slack.rss_text` - Custom title for Slack RSS updates
+- `slack.field_order` - Field order specific to Slack (overrides default `field_order`)
 
-💡 **Tip**: You can reorder fields or remove unwanted ones from the `field_order` array to customize your Discord message layout.
+💡 **Tip**: You can reorder fields or remove unwanted ones from the `field_order` arrays to customize your message layout. Slack and Discord can have different field orders.
 
 **Available Fields (if available):**
 - `id` - Unique entry identifier
@@ -170,6 +227,18 @@ docker-compose up -d --build
 * **Data**: `/app/data` - **Critical for persistence** (status tracking/deduplication)
 
 ⚠️ **Important**: Without the `/app/data` volume, all processed items tracking will be lost on container restart, causing duplicate Discord messages.
+
+## 🎨 Platform Support
+
+Both Discord and Slack are fully supported with the same ransomware data. The only difference:
+- **Discord**: Supports emoji in messages (including country flags 🇺🇸🇩🇪)
+- **Slack**: Uses Block Kit formatting without emoji support
+
+Both platforms:
+- Receive identical ransomware alerts and RSS feeds
+- Support customizable field ordering
+- Defang malicious URLs (http → hxxp) for security
+- Can be configured independently with separate webhooks
 
 ## Acknowledgments
 
