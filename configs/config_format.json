@@ -11,5 +11,21 @@
     "description",
     "screenshot",
     "post_url"
-  ]
+  ],
+  "slack": {
+    "title_text": "Ransomware Alert",
+    "rss_text": "RSS Feed Update",
+    "field_order": [
+      "group",
+      "victim",
+      "country",
+      "activity",
+      "attackdate",
+      "discovered",
+      "screenshot",
+      "post_url",
+      "website",
+      "description"
+    ]
+  }
 }

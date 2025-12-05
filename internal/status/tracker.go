@@ -1,6 +1,8 @@
 package status
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -28,7 +30,7 @@ type APIStatus struct {
 	LastError    *string                    `json:"last_error"`
 	EntriesFound int                        `json:"entries_found"`
 	FetchedItems []StoredRansomwareEntry    `json:"fetched_items"` // Changed to slice for sorting
-	SentItems    map[string]DiscordSentInfo `json:"sent_items"`    // Items sent to Discord
+	SentItems    map[string]WebhookSentInfo `json:"sent_items"`    // Items sent to webhooks (per webhook URL)
 }
 
 // StoredRansomwareEntry represents a complete ransomware entry for storage
@@ -48,18 +50,29 @@ type StoredRansomwareEntry struct {
 	Published   string `json:"published"` // Store as string for JSON compatibility
 }
 
-// DiscordSentInfo contains information about items sent to Discord
-type DiscordSentInfo struct {
-	Title  string    `json:"title"`
-	SentAt time.Time `json:"sent_at"`
+// WebhookSentInfo contains information about items sent to webhooks
+type WebhookSentInfo struct {
+	Title      string    `json:"title"`
+	SentAt     time.Time `json:"sent_at"`
+	ItemKey    string    `json:"item_key"`     // Added for reverse lookup
+	WebhookURL string    `json:"-"`            // Not stored in JSON (security) - only used in memory
 }
 
 // RSSStatus represents status for RSS feeds with two-phase tracking
 type RSSStatus struct {
-	LastUpdated time.Time                     `json:"last_updated"`
-	Feeds       map[string]FeedInfo           `json:"feeds"`
-	ParsedItems []StoredRSSEntry              `json:"parsed_items"`
-	SentItems   map[string]RSSDiscordSentInfo `json:"sent_items"`
+	LastUpdated time.Time                `json:"last_updated"`
+	Feeds       map[string]FeedInfo      `json:"feeds"`
+	ParsedItems []StoredRSSEntry         `json:"parsed_items"`
+	SentItems   map[string]RSSWebhookSentInfo `json:"sent_items"` // Per webhook tracking
+}
+
+// RSSWebhookSentInfo contains information about RSS items sent to webhooks
+type RSSWebhookSentInfo struct {
+	Title      string    `json:"title"`       // RSS Article Title
+	FeedTitle  string    `json:"feed_title"`  // RSS Feed Name (extra info)
+	SentAt     time.Time `json:"sent_at"`
+	ItemKey    string    `json:"item_key"`    // Added for reverse lookup
+	WebhookURL string    `json:"-"`           // Not stored in JSON (security) - only used in memory
 }
 
 // StoredRSSEntry represents a complete RSS entry for storage
@@ -77,11 +90,15 @@ type StoredRSSEntry struct {
 	ParsedAt    string   `json:"parsed_at"` // When it was parsed
 }
 
-// RSSDiscordSentInfo contains information about RSS items sent to Discord
-type RSSDiscordSentInfo struct {
-	Title     string    `json:"title"`      // RSS Article Title
-	FeedTitle string    `json:"feed_title"` // RSS Feed Name (extra info)
-	SentAt    time.Time `json:"sent_at"`
+// makeCompositeKey creates a secure composite key from itemKey and webhookURL
+// Uses SHA256 hash to prevent issues with special characters in keys
+// Optimized to avoid string concatenation allocations
+func makeCompositeKey(itemKey, webhookURL string) string {
+	h := sha256.New()
+	h.Write([]byte(itemKey))
+	h.Write([]byte{0}) // null separator
+	h.Write([]byte(webhookURL))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // NewTracker creates a new status tracker instance with separate files
@@ -114,7 +131,7 @@ func NewAPIStatus() *APIStatus {
 	return &APIStatus{
 		LastUpdated:  time.Now(),
 		FetchedItems: make([]StoredRansomwareEntry, 0),
-		SentItems:    make(map[string]DiscordSentInfo),
+		SentItems:    make(map[string]WebhookSentInfo),
 	}
 }
 
@@ -124,7 +141,7 @@ func NewRSSStatus() *RSSStatus {
 		LastUpdated: time.Now(),
 		Feeds:       make(map[string]FeedInfo),
 		ParsedItems: make([]StoredRSSEntry, 0),
-		SentItems:   make(map[string]RSSDiscordSentInfo),
+		SentItems:   make(map[string]RSSWebhookSentInfo),
 	}
 }
 
@@ -269,45 +286,77 @@ func (t *Tracker) MarkAPIItemFetched(itemKey string, entry StoredRansomwareEntry
 
 // sortFetchedItems sorts the fetched items by discovered time (oldest first)
 func (t *Tracker) sortFetchedItems() {
-	sort.Slice(t.apiStatus.FetchedItems, func(i, j int) bool {
-		// Parse discovered times for comparison
-		timeI, errI := time.Parse("2006-01-02 15:04:05.999999", t.apiStatus.FetchedItems[i].Discovered)
-		if errI != nil {
-			timeI, _ = time.Parse("2006-01-02 15:04:05", t.apiStatus.FetchedItems[i].Discovered)
-		}
+	// Pre-parse all times to avoid parsing during sort comparison
+	type entryWithTime struct {
+		entry StoredRansomwareEntry
+		time  time.Time
+	}
 
-		timeJ, errJ := time.Parse("2006-01-02 15:04:05.999999", t.apiStatus.FetchedItems[j].Discovered)
-		if errJ != nil {
-			timeJ, _ = time.Parse("2006-01-02 15:04:05", t.apiStatus.FetchedItems[j].Discovered)
+	items := make([]entryWithTime, len(t.apiStatus.FetchedItems))
+	for i, entry := range t.apiStatus.FetchedItems {
+		parsedTime, err := time.Parse("2006-01-02 15:04:05.999999", entry.Discovered)
+		if err != nil {
+			parsedTime, _ = time.Parse("2006-01-02 15:04:05", entry.Discovered)
 		}
+		items[i] = entryWithTime{entry, parsedTime}
+	}
 
-		return timeI.Before(timeJ)
+	// Sort by pre-parsed times
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].time.Before(items[j].time)
 	})
+
+	// Reconstruct sorted slice
+	for i, item := range items {
+		t.apiStatus.FetchedItems[i] = item.entry
+	}
 }
 
-// IsAPIItemSent checks if an API item was already sent to Discord
+// IsAPIItemSent checks if an API item was already sent to ANY webhook (for API interface compatibility)
 func (t *Tracker) IsAPIItemSent(itemKey string) bool {
 	t.mutex.RLock()
 	defer t.mutex.RUnlock()
 
-	_, sent := t.apiStatus.SentItems[itemKey]
+	// Check if sent to any webhook by looking at ItemKey field
+	for _, info := range t.apiStatus.SentItems {
+		if info.ItemKey == itemKey {
+			return true
+		}
+	}
+	return false
+}
+
+// IsAPIItemSentToWebhook checks if an API item was already sent to a specific webhook
+func (t *Tracker) IsAPIItemSentToWebhook(itemKey, webhookURL string) bool {
+	t.mutex.RLock()
+	defer t.mutex.RUnlock()
+
+	// Create composite key using secure hash
+	compositeKey := makeCompositeKey(itemKey, webhookURL)
+
+	_, sent := t.apiStatus.SentItems[compositeKey]
 	return sent
 }
 
-// MarkAPIItemSent marks an API item as sent to Discord
+// MarkAPIItemSent marks an API item as sent to a webhook
 func (t *Tracker) MarkAPIItemSent(itemKey, itemTitle, webhookURL string) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
 
 	// Ensure SentItems map exists
 	if t.apiStatus.SentItems == nil {
-		t.apiStatus.SentItems = make(map[string]DiscordSentInfo)
+		t.apiStatus.SentItems = make(map[string]WebhookSentInfo)
 	}
 
-	// Mark item as sent (without storing webhook URL for security)
-	t.apiStatus.SentItems[itemKey] = DiscordSentInfo{
-		Title:  itemTitle,
-		SentAt: time.Now(),
+	// Create composite key using secure hash
+	compositeKey := makeCompositeKey(itemKey, webhookURL)
+
+	// Mark item as sent to this specific webhook
+	t.apiStatus.SentItems[compositeKey] = WebhookSentInfo{
+		Title:      itemTitle,
+		SentAt:     time.Now(),
+		ItemKey:    itemKey,
+		WebhookURL: webhookURL,
 	}
 	t.apiStatus.LastUpdated = time.Now()
 
@@ -352,21 +401,49 @@ func (t *Tracker) GetUnsentAPIItems() map[string]StoredRansomwareEntry {
 	return unsent
 }
 
-// GetUnsentAPIItemsSorted returns a sorted slice of complete API entries that were fetched but not yet sent
+// GetUnsentAPIItemsSorted returns a sorted slice of complete API entries that were fetched but not yet sent to ANY webhook
 func (t *Tracker) GetUnsentAPIItemsSorted() []StoredRansomwareEntry {
 	t.mutex.RLock()
 	defer t.mutex.RUnlock()
 
+	// Build a set of sent item keys for O(1) lookup instead of O(n) for each item
+	sentKeys := make(map[string]bool, len(t.apiStatus.SentItems))
+	for _, info := range t.apiStatus.SentItems {
+		sentKeys[info.ItemKey] = true
+	}
+
 	var unsent []StoredRansomwareEntry
 
-	// Check each fetched item to see if it was sent (items are already sorted by discovered time)
+	// Check each fetched item to see if it was sent to any webhook (items are already sorted by discovered time)
 	for _, entry := range t.apiStatus.FetchedItems {
-		if _, sent := t.apiStatus.SentItems[entry.Key]; !sent {
+		if !sentKeys[entry.Key] {
 			unsent = append(unsent, entry)
 		}
 	}
 
 	log.WithField("unsent_count", len(unsent)).Debug("Retrieved unsent API items in chronological order")
+	return unsent
+}
+
+// GetUnsentAPIItemsForWebhook returns API entries not yet sent to a specific webhook
+func (t *Tracker) GetUnsentAPIItemsForWebhook(webhookURL string) []StoredRansomwareEntry {
+	t.mutex.RLock()
+	defer t.mutex.RUnlock()
+
+	var unsent []StoredRansomwareEntry
+
+	// Check each fetched item to see if it was sent to this specific webhook
+	for _, entry := range t.apiStatus.FetchedItems {
+		compositeKey := makeCompositeKey(entry.Key, webhookURL)
+		if _, sent := t.apiStatus.SentItems[compositeKey]; !sent {
+			unsent = append(unsent, entry)
+		}
+	}
+
+	log.WithFields(log.Fields{
+		"unsent_count": len(unsent),
+		"webhook_url":  webhookURL,
+	}).Debug("Retrieved unsent API items for specific webhook")
 	return unsent
 }
 
@@ -440,25 +517,42 @@ func (t *Tracker) IsRSSItemSent(itemKey string) bool {
 	t.mutex.RLock()
 	defer t.mutex.RUnlock()
 
-	_, sent := t.rssStatus.SentItems[itemKey]
-	return sent
+	// Check if this item was sent by looking for ItemKey match
+	for _, sentInfo := range t.rssStatus.SentItems {
+		if sentInfo.ItemKey == itemKey {
+			return true
+		}
+	}
+	return false
 }
 
-// MarkRSSItemSent marks an RSS item as sent to Discord
+// MarkRSSItemSent marks an RSS item as sent to a webhook (LEGACY - uses composite key internally)
 func (t *Tracker) MarkRSSItemSent(itemKey, itemTitle, feedTitle string) {
+	// For backward compatibility, we'll assume this is for the "default" webhook
+	// In practice, this should use MarkRSSItemSentToWebhook instead
+	t.MarkRSSItemSentToWebhook(itemKey, itemTitle, feedTitle, "")
+}
+
+// MarkRSSItemSentToWebhook marks an RSS item as sent to a specific webhook
+func (t *Tracker) MarkRSSItemSentToWebhook(itemKey, itemTitle, feedTitle, webhookURL string) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
 
 	// Ensure SentItems map exists
 	if t.rssStatus.SentItems == nil {
-		t.rssStatus.SentItems = make(map[string]RSSDiscordSentInfo)
+		t.rssStatus.SentItems = make(map[string]RSSWebhookSentInfo)
 	}
 
-	// Mark item as sent
-	t.rssStatus.SentItems[itemKey] = RSSDiscordSentInfo{
-		Title:     itemTitle,
-		FeedTitle: feedTitle,
-		SentAt:    time.Now(),
+	// Create secure composite key using SHA256 hash
+	compositeKey := makeCompositeKey(itemKey, webhookURL)
+
+	// Mark item as sent to this specific webhook
+	t.rssStatus.SentItems[compositeKey] = RSSWebhookSentInfo{
+		Title:      itemTitle,
+		FeedTitle:  feedTitle,
+		SentAt:     time.Now(),
+		ItemKey:    itemKey,    // Store for reverse lookup
+		WebhookURL: webhookURL, // Store for lookups
 	}
 	t.rssStatus.LastUpdated = time.Now()
 
@@ -476,11 +570,17 @@ func (t *Tracker) GetUnsentRSSItemsSorted() []StoredRSSEntry {
 	t.mutex.RLock()
 	defer t.mutex.RUnlock()
 
+	// Build a set of sent item keys for O(1) lookup instead of O(n) for each item
+	sentKeys := make(map[string]bool, len(t.rssStatus.SentItems))
+	for _, sentInfo := range t.rssStatus.SentItems {
+		sentKeys[sentInfo.ItemKey] = true
+	}
+
 	var unsent []StoredRSSEntry
 
 	// Check each parsed item to see if it was sent (items are already sorted by published time)
 	for _, entry := range t.rssStatus.ParsedItems {
-		if _, sent := t.rssStatus.SentItems[entry.Key]; !sent {
+		if !sentKeys[entry.Key] {
 			unsent = append(unsent, entry)
 		}
 	}
@@ -491,43 +591,77 @@ func (t *Tracker) GetUnsentRSSItemsSorted() []StoredRSSEntry {
 
 // sortRSSParsedItems sorts the parsed RSS items by published time (oldest first)
 func (t *Tracker) sortRSSParsedItems() {
-	sort.Slice(t.rssStatus.ParsedItems, func(i, j int) bool {
-		// Parse published times for comparison
-		timeI, errI := time.Parse("2006-01-02 15:04:05.999999", t.rssStatus.ParsedItems[i].Published)
-		if errI != nil {
-			timeI, _ = time.Parse("2006-01-02 15:04:05", t.rssStatus.ParsedItems[i].Published)
-		}
+	// Pre-parse all times to avoid parsing during sort comparison
+	type itemWithTime struct {
+		item StoredRSSEntry
+		time time.Time
+	}
 
-		timeJ, errJ := time.Parse("2006-01-02 15:04:05.999999", t.rssStatus.ParsedItems[j].Published)
-		if errJ != nil {
-			timeJ, _ = time.Parse("2006-01-02 15:04:05", t.rssStatus.ParsedItems[j].Published)
+	items := make([]itemWithTime, len(t.rssStatus.ParsedItems))
+	for i, entry := range t.rssStatus.ParsedItems {
+		parsedTime, err := time.Parse("2006-01-02 15:04:05.999999", entry.Published)
+		if err != nil {
+			parsedTime, _ = time.Parse("2006-01-02 15:04:05", entry.Published)
 		}
+		items[i] = itemWithTime{entry, parsedTime}
+	}
 
-		return timeI.Before(timeJ)
+	// Sort by pre-parsed times
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].time.Before(items[j].time)
 	})
+
+	// Reconstruct sorted slice
+	for i, item := range items {
+		t.rssStatus.ParsedItems[i] = item.item
+	}
 }
 
 // cleanupOldRSSParsedItems removes old parsed items
 func (t *Tracker) cleanupOldRSSParsedItems() {
 	const maxParsedItems = 5000 // Keep max 5000 parsed RSS items
 
-	if len(t.rssStatus.ParsedItems) > maxParsedItems {
+	currentLen := len(t.rssStatus.ParsedItems)
+	if currentLen > maxParsedItems {
 		// Keep only the most recent items (slice is already sorted by time)
-		t.rssStatus.ParsedItems = t.rssStatus.ParsedItems[len(t.rssStatus.ParsedItems)-maxParsedItems:]
-		log.Debug("Cleaned up old RSS parsed items")
+		// Use copy to prevent memory leak from underlying array retention
+		startIdx := currentLen - maxParsedItems
+		if startIdx < 0 {
+			startIdx = 0 // Safety check to prevent negative index
+		}
+		newSlice := make([]StoredRSSEntry, maxParsedItems)
+		copy(newSlice, t.rssStatus.ParsedItems[startIdx:])
+		t.rssStatus.ParsedItems = newSlice
+		log.WithField("removed", currentLen-len(newSlice)).Debug("Cleaned up old RSS parsed items")
 	}
 }
 
-// cleanupOldRSSSentItems removes old sent RSS items
+// cleanupOldRSSSentItems removes old sent RSS items based on count and age
 // NOTE: Must be called with t.mutex locked
 func (t *Tracker) cleanupOldRSSSentItems() {
-	const maxSentItems = 1000 // Keep max 1000 sent RSS items
+	const maxSentItems = 1000         // Keep max 1000 sent RSS items
+	const maxAge = 30 * 24 * time.Hour // Keep max 30 days
 
+	// First, remove items older than maxAge
+	now := time.Now()
+	removedByAge := 0
+	for k, v := range t.rssStatus.SentItems {
+		if now.Sub(v.SentAt) > maxAge {
+			delete(t.rssStatus.SentItems, k)
+			removedByAge++
+		}
+	}
+
+	if removedByAge > 0 {
+		log.WithField("removed", removedByAge).Debug("Cleaned up RSS sent items older than 30 days")
+	}
+
+	// Then apply count-based cleanup if still too many
 	if len(t.rssStatus.SentItems) > maxSentItems {
 		// Create slice of items with timestamps for sorting
 		type itemWithTime struct {
 			key  string
-			info RSSDiscordSentInfo
+			info RSSWebhookSentInfo
 		}
 		items := make([]itemWithTime, 0, len(t.rssStatus.SentItems))
 		for k, v := range t.rssStatus.SentItems {
@@ -540,7 +674,7 @@ func (t *Tracker) cleanupOldRSSSentItems() {
 		})
 
 		// Keep only the most recent maxSentItems
-		newMap := make(map[string]RSSDiscordSentInfo, maxSentItems)
+		newMap := make(map[string]RSSWebhookSentInfo, maxSentItems)
 		startIdx := len(items) - maxSentItems
 		for i := startIdx; i < len(items); i++ {
 			newMap[items[i].key] = items[i].info
@@ -550,7 +684,7 @@ func (t *Tracker) cleanupOldRSSSentItems() {
 		log.WithFields(log.Fields{
 			"removed": len(items) - maxSentItems,
 			"kept":    maxSentItems,
-		}).Debug("Cleaned up old RSS sent items")
+		}).Debug("Cleaned up old RSS sent items by count")
 	}
 }
 
@@ -580,23 +714,47 @@ func (t *Tracker) MarkItemProcessed(feedURL, itemKey, itemTitle string) {
 func (t *Tracker) cleanupOldAPIFetchedItems() {
 	const maxFetchedItems = 1000 // Keep max 1000 fetched API items
 
-	if len(t.apiStatus.FetchedItems) > maxFetchedItems {
+	currentLen := len(t.apiStatus.FetchedItems)
+	if currentLen > maxFetchedItems {
 		// Keep only the most recent items (slice is already sorted by time)
-		t.apiStatus.FetchedItems = t.apiStatus.FetchedItems[len(t.apiStatus.FetchedItems)-maxFetchedItems:]
-		log.Debug("Cleaned up old API fetched items")
+		// Use copy to prevent memory leak from underlying array retention
+		startIdx := currentLen - maxFetchedItems
+		if startIdx < 0 {
+			startIdx = 0 // Safety check to prevent negative index
+		}
+		newSlice := make([]StoredRansomwareEntry, maxFetchedItems)
+		copy(newSlice, t.apiStatus.FetchedItems[startIdx:])
+		t.apiStatus.FetchedItems = newSlice
+		log.WithField("removed", currentLen-len(newSlice)).Debug("Cleaned up old API fetched items")
 	}
 }
 
-// cleanupOldAPISentItems removes old sent items
+// cleanupOldAPISentItems removes old sent items based on count and age
 // NOTE: Must be called with t.mutex locked
 func (t *Tracker) cleanupOldAPISentItems() {
-	const maxSentItems = 1000 // Keep max 1000 sent API items
+	const maxSentItems = 1000         // Keep max 1000 sent API items
+	const maxAge = 30 * 24 * time.Hour // Keep max 30 days
 
+	// First, remove items older than maxAge
+	now := time.Now()
+	removedByAge := 0
+	for k, v := range t.apiStatus.SentItems {
+		if now.Sub(v.SentAt) > maxAge {
+			delete(t.apiStatus.SentItems, k)
+			removedByAge++
+		}
+	}
+
+	if removedByAge > 0 {
+		log.WithField("removed", removedByAge).Debug("Cleaned up API sent items older than 30 days")
+	}
+
+	// Then apply count-based cleanup if still too many
 	if len(t.apiStatus.SentItems) > maxSentItems {
 		// Create slice of items with timestamps for sorting
 		type itemWithTime struct {
 			key  string
-			info DiscordSentInfo
+			info WebhookSentInfo
 		}
 		items := make([]itemWithTime, 0, len(t.apiStatus.SentItems))
 		for k, v := range t.apiStatus.SentItems {
@@ -609,7 +767,7 @@ func (t *Tracker) cleanupOldAPISentItems() {
 		})
 
 		// Keep only the most recent maxSentItems
-		newMap := make(map[string]DiscordSentInfo, maxSentItems)
+		newMap := make(map[string]WebhookSentInfo, maxSentItems)
 		startIdx := len(items) - maxSentItems
 		for i := startIdx; i < len(items); i++ {
 			newMap[items[i].key] = items[i].info
@@ -619,7 +777,7 @@ func (t *Tracker) cleanupOldAPISentItems() {
 		log.WithFields(log.Fields{
 			"removed": len(items) - maxSentItems,
 			"kept":    maxSentItems,
-		}).Debug("Cleaned up old API sent items")
+		}).Debug("Cleaned up old API sent items by count")
 	}
 }
 
@@ -655,8 +813,26 @@ func (t *Tracker) saveAPIStatus() error {
 		return fmt.Errorf("failed to write temporary API status file: %w", err)
 	}
 
-	if err := os.Rename(tempFile, filePath); err != nil {
-		return fmt.Errorf("failed to rename API status file: %w", err)
+	// Attempt to rename with retry logic (helps on Windows with AV/backup software)
+	var renameErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		renameErr = os.Rename(tempFile, filePath)
+		if renameErr == nil {
+			break // Success
+		}
+		log.WithFields(log.Fields{
+			"attempt": attempt + 1,
+			"error":   renameErr,
+		}).Warn("Failed to rename API status file, retrying...")
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Cleanup temp file on failure
+	if renameErr != nil {
+		if cleanupErr := os.Remove(tempFile); cleanupErr != nil {
+			log.WithError(cleanupErr).Error("Failed to cleanup temporary API status file")
+		}
+		return fmt.Errorf("failed to rename API status file after 3 attempts: %w", renameErr)
 	}
 
 	log.WithField("file", filePath).Debug("API status saved to file with sorted entries")
@@ -678,8 +854,26 @@ func (t *Tracker) saveRSSStatus() error {
 		return fmt.Errorf("failed to write temporary RSS status file: %w", err)
 	}
 
-	if err := os.Rename(tempFile, filePath); err != nil {
-		return fmt.Errorf("failed to rename RSS status file: %w", err)
+	// Attempt to rename with retry logic (helps on Windows with AV/backup software)
+	var renameErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		renameErr = os.Rename(tempFile, filePath)
+		if renameErr == nil {
+			break // Success
+		}
+		log.WithFields(log.Fields{
+			"attempt": attempt + 1,
+			"error":   renameErr,
+		}).Warn("Failed to rename RSS status file, retrying...")
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Cleanup temp file on failure
+	if renameErr != nil {
+		if cleanupErr := os.Remove(tempFile); cleanupErr != nil {
+			log.WithError(cleanupErr).Error("Failed to cleanup temporary RSS status file")
+		}
+		return fmt.Errorf("failed to rename RSS status file after 3 attempts: %w", renameErr)
 	}
 
 	log.WithField("file", filePath).Debug("RSS status saved to file")
@@ -710,7 +904,7 @@ func (t *Tracker) loadAPIStatus() error {
 		loadedStatus.FetchedItems = make([]StoredRansomwareEntry, 0)
 	}
 	if loadedStatus.SentItems == nil {
-		loadedStatus.SentItems = make(map[string]DiscordSentInfo)
+		loadedStatus.SentItems = make(map[string]WebhookSentInfo)
 	}
 
 	// Lock mutex before modifying shared state
@@ -799,7 +993,7 @@ func (t *Tracker) loadRSSStatus() error {
 		loadedStatus.ParsedItems = make([]StoredRSSEntry, 0)
 	}
 	if loadedStatus.SentItems == nil {
-		loadedStatus.SentItems = make(map[string]RSSDiscordSentInfo)
+		loadedStatus.SentItems = make(map[string]RSSWebhookSentInfo)
 	}
 
 	// Lock mutex before modifying shared state

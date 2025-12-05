@@ -76,7 +76,8 @@ func loadGeneralConfig(cfg *Config, configDir string) error {
 	cfg.APIKey = generalCfg.APIKey
 	cfg.APIStartTime = generalCfg.APIStartTime
 	cfg.RSSRetryCount = generalCfg.RSSRetryCount
-	cfg.Webhooks = generalCfg.Webhooks
+	cfg.DiscordWebhooks = generalCfg.DiscordWebhooks
+	cfg.SlackWebhooks = generalCfg.SlackWebhooks
 
 	// Apply log rotation settings (use defaults if not specified)
 	// Prevents misconfiguration that could exhaust disk space
@@ -129,6 +130,15 @@ func loadGeneralConfig(cfg *Config, configDir string) error {
 			return fmt.Errorf("invalid discord_delay format: %w", err)
 		}
 		cfg.DiscordDelay = duration
+	}
+
+	// Parse Slack delay duration
+	if generalCfg.SlackDelay != "" {
+		duration, err := time.ParseDuration(generalCfg.SlackDelay)
+		if err != nil {
+			return fmt.Errorf("invalid slack_delay format: %w", err)
+		}
+		cfg.SlackDelay = duration
 	}
 
 	return nil
@@ -209,19 +219,31 @@ func validateConfig(cfg *Config) error {
 	}
 
 	// Validate API key if any webhook is enabled
-	hasEnabledWebhook := cfg.Webhooks.Ransomware.Enabled || cfg.Webhooks.RSS.Enabled || cfg.Webhooks.Government.Enabled
-	if hasEnabledWebhook && cfg.APIKey == "" {
+	hasEnabledDiscordWebhook := cfg.DiscordWebhooks.Ransomware.Enabled || cfg.DiscordWebhooks.RSS.Enabled || cfg.DiscordWebhooks.Government.Enabled
+	hasEnabledSlackWebhook := cfg.SlackWebhooks.Ransomware.Enabled || cfg.SlackWebhooks.RSS.Enabled || cfg.SlackWebhooks.Government.Enabled
+	if (hasEnabledDiscordWebhook || hasEnabledSlackWebhook) && cfg.APIKey == "" {
 		log.Warn("API key is empty but webhooks are enabled")
 	}
 
-	// Validate webhook URLs
-	if err := validateWebhook("ransomware", cfg.Webhooks.Ransomware); err != nil {
+	// Validate Discord webhook URLs
+	if err := validateDiscordWebhook("ransomware", cfg.DiscordWebhooks.Ransomware); err != nil {
 		return err
 	}
-	if err := validateWebhook("rss", cfg.Webhooks.RSS); err != nil {
+	if err := validateDiscordWebhook("rss", cfg.DiscordWebhooks.RSS); err != nil {
 		return err
 	}
-	if err := validateWebhook("government", cfg.Webhooks.Government); err != nil {
+	if err := validateDiscordWebhook("government", cfg.DiscordWebhooks.Government); err != nil {
+		return err
+	}
+
+	// Validate Slack webhook URLs
+	if err := validateSlackWebhook("ransomware", cfg.SlackWebhooks.Ransomware); err != nil {
+		return err
+	}
+	if err := validateSlackWebhook("rss", cfg.SlackWebhooks.RSS); err != nil {
+		return err
+	}
+	if err := validateSlackWebhook("government", cfg.SlackWebhooks.Government); err != nil {
 		return err
 	}
 
@@ -243,10 +265,26 @@ func validateConfig(cfg *Config) error {
 	if cfg.DiscordDelay < 0 {
 		return fmt.Errorf("discord_delay cannot be negative: %v", cfg.DiscordDelay)
 	}
-	// Validate Discord delay
+	// Minimum 400ms to avoid Discord rate limits (5 requests per 2 seconds)
+	if cfg.DiscordDelay < 400*time.Millisecond {
+		return fmt.Errorf("discord_delay too short: %v (minimum 400ms to avoid rate limits)", cfg.DiscordDelay)
+	}
 	// Maximum 30 seconds prevents excessive delays in alert delivery
 	if cfg.DiscordDelay > 30*time.Second {
 		return fmt.Errorf("discord_delay too long: %v (maximum 30 seconds)", cfg.DiscordDelay)
+	}
+
+	// Validate Slack delay
+	if cfg.SlackDelay < 0 {
+		return fmt.Errorf("slack_delay cannot be negative: %v", cfg.SlackDelay)
+	}
+	// Minimum 1 second to avoid Slack rate limits (1 message per second per webhook)
+	if cfg.SlackDelay < time.Second {
+		return fmt.Errorf("slack_delay too short: %v (minimum 1s to avoid rate limits)", cfg.SlackDelay)
+	}
+	// Maximum 30 seconds prevents excessive delays in alert delivery
+	if cfg.SlackDelay > 30*time.Second {
+		return fmt.Errorf("slack_delay too long: %v (maximum 30 seconds)", cfg.SlackDelay)
 	}
 
 	// Validate retry count
@@ -257,7 +295,7 @@ func validateConfig(cfg *Config) error {
 	return nil
 }
 
-// validateWebhook validates a webhook configuration
+// validateDiscordWebhook validates a Discord webhook configuration
 //
 // Security checks:
 // - Ensures webhook URL is from Discord's official domain
@@ -265,13 +303,33 @@ func validateConfig(cfg *Config) error {
 // - URL format validation prevents injection attacks
 //
 // Only validates format - does not test webhook functionality
-func validateWebhook(name string, webhook WebhookConfig) error {
+func validateDiscordWebhook(name string, webhook WebhookConfig) error {
 	if webhook.Enabled {
 		if webhook.URL == "" {
-			return fmt.Errorf("%s webhook is enabled but URL is empty", name)
+			return fmt.Errorf("discord %s webhook is enabled but URL is empty", name)
 		}
 		if !strings.HasPrefix(webhook.URL, "https://discord.com/api/webhooks/") {
-			return fmt.Errorf("%s webhook URL is not a valid Discord webhook URL", name)
+			return fmt.Errorf("discord %s webhook URL is not a valid Discord webhook URL", name)
+		}
+	}
+	return nil
+}
+
+// validateSlackWebhook validates a Slack webhook configuration
+//
+// Security checks:
+// - Ensures webhook URL is from Slack's official domain
+// - Prevents configuration of malicious webhook endpoints
+// - URL format validation prevents injection attacks
+//
+// Only validates format - does not test webhook functionality
+func validateSlackWebhook(name string, webhook WebhookConfig) error {
+	if webhook.Enabled {
+		if webhook.URL == "" {
+			return fmt.Errorf("slack %s webhook is enabled but URL is empty", name)
+		}
+		if !strings.HasPrefix(webhook.URL, "https://hooks.slack.com/services/") {
+			return fmt.Errorf("slack %s webhook URL is not a valid Slack webhook URL (must start with https://hooks.slack.com/services/)", name)
 		}
 	}
 	return nil
