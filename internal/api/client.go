@@ -15,10 +15,18 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
+)
+
+// Retry configuration
+const (
+	maxRetries     = 3
+	baseRetryDelay = 1 * time.Second
 )
 
 // Client represents the HTTP client for external APIs
@@ -78,6 +86,7 @@ func NewClient(apiKey string) (*Client, error) {
 	// - Session resumption reduces TLS handshake overhead
 	transport := &http.Transport{
 		TLSClientConfig:       tlsConfig,
+		ForceAttemptHTTP2:     true,  // Enable HTTP/2 for custom transports
 		DisableCompression:    false, // Keep compression for performance
 		DisableKeepAlives:     false, // Keep alive for performance
 		MaxIdleConns:          10,    // Limit idle connections
@@ -96,7 +105,7 @@ func NewClient(apiKey string) (*Client, error) {
 	}, nil
 }
 
-// makeRequest performs HTTPS requests to external APIs with comprehensive error handling
+// makeRequest performs HTTPS requests to external APIs with retry logic and rate-limit handling
 //
 // Security measures:
 // - Enforces TLS 1.2+ encryption for all requests (configured in transport)
@@ -105,47 +114,133 @@ func NewClient(apiKey string) (*Client, error) {
 // - Context-aware cancellation support
 // - Certificate verification always enabled
 //
+// Retry behavior:
+// - Retries on rate-limit (429), server errors (5xx), and network errors
+// - Exponential backoff between retries
+// - Respects context cancellation
+//
 // Authentication:
 // - Uses X-API-KEY header when API key is provided (encrypted via TLS)
 // - User-Agent mimics wget for compatibility
 func (c *Client) makeRequest(ctx context.Context, url string, target interface{}) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+	var lastErr error
+	var lastStatusCode int
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Check context before each attempt
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		// Wait before retry (linear backoff)
+		if attempt > 0 {
+			retryDelay := baseRetryDelay * time.Duration(attempt)
+			log.WithFields(log.Fields{
+				"attempt": attempt + 1,
+				"delay":   retryDelay,
+				"url":     url,
+			}).Debug("Retrying API request")
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(retryDelay):
+			}
+		}
+
+		// Create request
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+
+		// Add API key if provided
+		if c.apiKey != "" {
+			req.Header.Set("X-API-KEY", c.apiKey)
+		}
+
+		// Set common headers
+		req.Header.Set("User-Agent", "Wget/1.21.3")
+		req.Header.Set("Accept", "application/json")
+
+		// Perform request
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("request failed: %w", err)
+			if isRetryableNetworkError(err) {
+				log.WithError(err).WithField("attempt", attempt+1).Warn("API request failed, retrying...")
+				continue
+			}
+			return lastErr
+		}
+
+		lastStatusCode = resp.StatusCode
+
+		// Check if status code is retryable
+		if isRetryableStatusCode(resp.StatusCode) {
+			// Read and discard body to allow connection reuse
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+
+			lastErr = fmt.Errorf("API returned status %d: %s", resp.StatusCode, resp.Status)
+			log.WithFields(log.Fields{
+				"status_code": resp.StatusCode,
+				"attempt":     attempt + 1,
+			}).Warn("API request failed with retryable status, retrying...")
+			continue
+		}
+
+		// Non-retryable error status
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024)) // Read first 1KB for error message
+			resp.Body.Close()
+			return fmt.Errorf("API returned status %d: %s - %s", resp.StatusCode, resp.Status, string(body))
+		}
+
+		// Success - decode response
+		// Limit response body size to prevent memory exhaustion attacks
+		resp.Body = http.MaxBytesReader(nil, resp.Body, 10<<20) // 10MB limit
+
+		if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+			resp.Body.Close()
+			return fmt.Errorf("failed to decode response: %w", err)
+		}
+		resp.Body.Close()
+
+		return nil
 	}
 
-	// Add API key if provided
-	if c.apiKey != "" {
-		req.Header.Set("X-API-KEY", c.apiKey)
+	return fmt.Errorf("failed after %d attempts (last status: %d): %w", maxRetries, lastStatusCode, lastErr)
+}
+
+// isRetryableNetworkError checks if a network error is temporary and worth retrying
+func isRetryableNetworkError(err error) bool {
+	if err == nil {
+		return false
 	}
+	errStr := strings.ToLower(err.Error())
 
-	// Set common headers
-	req.Header.Set("User-Agent", "Wget/1.21.3")
-	req.Header.Set("Accept", "application/json")
+	return strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "connection") ||
+		strings.Contains(errStr, "temporary") ||
+		strings.Contains(errStr, "unavailable") ||
+		strings.Contains(errStr, "reset")
+}
 
-	// Perform request
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
+// isRetryableStatusCode checks if an HTTP status code is worth retrying
+func isRetryableStatusCode(statusCode int) bool {
+	switch statusCode {
+	case http.StatusTooManyRequests,     // 429 - Rate limit
+		http.StatusInternalServerError,   // 500
+		http.StatusBadGateway,            // 502
+		http.StatusServiceUnavailable,    // 503
+		http.StatusGatewayTimeout:        // 504
+		return true
+	default:
+		return false
 	}
-	defer resp.Body.Close()
-
-	// Check status code
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("API returned status %d: %s", resp.StatusCode, resp.Status)
-	}
-
-	// Limit response body size to prevent memory exhaustion attacks
-	// 10MB should be sufficient for API responses while protecting against
-	// malicious servers sending unlimited data
-	resp.Body = http.MaxBytesReader(nil, resp.Body, 10<<20) // 10MB limit
-
-	// Decode JSON response
-	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
-		return fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return nil
 }
 
 // logRequest logs API request details for monitoring and debugging

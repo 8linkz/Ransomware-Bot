@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"Ransomware-Bot/internal/api"
@@ -14,6 +15,12 @@ import (
 	"Ransomware-Bot/internal/rss"
 
 	log "github.com/sirupsen/logrus"
+)
+
+// Retry configuration
+const (
+	maxRetries     = 3
+	baseRetryDelay = 1 * time.Second
 )
 
 // WebhookSender handles sending messages to Slack webhooks
@@ -28,6 +35,14 @@ func NewWebhookSender() *WebhookSender {
 			Timeout: 10 * time.Second,
 		},
 	}
+}
+
+// Close closes the HTTP client and releases resources
+func (w *WebhookSender) Close() error {
+	if w.client != nil {
+		w.client.CloseIdleConnections()
+	}
+	return nil
 }
 
 // SendRansomwareEntry sends a ransomware entry to a Slack webhook
@@ -80,7 +95,7 @@ func (w *WebhookSender) SendRSSEntry(ctx context.Context, webhookURL string, ent
 	return nil
 }
 
-// executeWebhook sends a webhook message to Slack
+// executeWebhook sends a webhook message to Slack with retry logic
 func (w *WebhookSender) executeWebhook(ctx context.Context, webhookURL string, payload any) error {
 	// Marshal payload to JSON
 	jsonData, err := json.Marshal(payload)
@@ -88,55 +103,113 @@ func (w *WebhookSender) executeWebhook(ctx context.Context, webhookURL string, p
 		return fmt.Errorf("failed to marshal payload: %w", err)
 	}
 
-	// Log the JSON payload at debug level
 	log.WithField("payload_size", len(jsonData)).Debug("Sending Slack webhook request")
 	log.WithField("payload", string(jsonData)).Trace("Slack webhook payload")
 
-	// Create HTTP request with context
-	req, err := http.NewRequestWithContext(ctx, "POST", webhookURL, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
-	}
+	var lastErr error
+	var lastStatusCode int
 
-	req.Header.Set("Content-Type", "application/json")
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// Check context before each attempt
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 
-	// Send request
-	resp, err := w.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send request: %w", err)
-	}
-	defer resp.Body.Close()
+		// Wait before retry (linear backoff)
+		if attempt > 0 {
+			retryDelay := baseRetryDelay * time.Duration(attempt)
+			log.WithFields(log.Fields{
+				"attempt": attempt + 1,
+				"delay":   retryDelay,
+			}).Debug("Retrying Slack webhook")
 
-	// Read response body for detailed error information
-	body, readErr := io.ReadAll(resp.Body)
-	if readErr != nil {
-		log.WithError(readErr).Warn("Failed to read Slack response body")
-	}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(retryDelay):
+			}
+		}
 
-	// Check response status
-	if resp.StatusCode != http.StatusOK {
-		// Log the full error details from Slack
+		// Create HTTP request with context
+		req, err := http.NewRequestWithContext(ctx, "POST", webhookURL, bytes.NewBuffer(jsonData))
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		// Send request
+		resp, err := w.client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("failed to send request: %w", err)
+			if isRetryableError(err) {
+				log.WithError(err).WithField("attempt", attempt+1).Warn("Slack webhook request failed, retrying...")
+				continue
+			}
+			return lastErr
+		}
+
+		// Read response body
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		lastStatusCode = resp.StatusCode
+
+		// Success
+		if resp.StatusCode == http.StatusOK {
+			log.WithField("response", string(body)).Debug("Slack webhook response")
+			return nil
+		}
+
+		// Check if status code is retryable
 		bodyStr := string(body)
+		lastErr = fmt.Errorf("slack webhook returned status %d: %s", resp.StatusCode, bodyStr)
 
-		// Log to console with full details for debugging
-		fmt.Printf("\n=== SLACK WEBHOOK ERROR ===\n")
-		fmt.Printf("Status Code: %d\n", resp.StatusCode)
-		fmt.Printf("Response Body: %s\n", bodyStr)
-		fmt.Printf("Payload Size: %d bytes\n", len(jsonData))
-		fmt.Printf("Payload JSON:\n%s\n", string(jsonData))
-		fmt.Printf("===========================\n\n")
+		if isRetryableStatusCode(resp.StatusCode) {
+			log.WithFields(log.Fields{
+				"status_code": resp.StatusCode,
+				"attempt":     attempt + 1,
+			}).Warn("Slack webhook failed with retryable status, retrying...")
+			continue
+		}
 
+		// Non-retryable error - log and return immediately
 		log.WithFields(log.Fields{
 			"status_code":   resp.StatusCode,
 			"response_body": bodyStr,
 			"payload_size":  len(jsonData),
 		}).Error("Slack webhook request failed")
 
-		return fmt.Errorf("slack webhook returned status %d: %s - response: %s", resp.StatusCode, resp.Status, bodyStr)
+		return lastErr
 	}
 
-	// Log successful response at debug level
-	log.WithField("response", string(body)).Debug("Slack webhook response")
+	return fmt.Errorf("failed after %d attempts (last status: %d): %w", maxRetries, lastStatusCode, lastErr)
+}
 
-	return nil
+// isRetryableError checks if a network error is temporary and worth retrying
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+
+	return strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "connection") ||
+		strings.Contains(errStr, "temporary") ||
+		strings.Contains(errStr, "unavailable")
+}
+
+// isRetryableStatusCode checks if an HTTP status code is worth retrying
+func isRetryableStatusCode(statusCode int) bool {
+	switch statusCode {
+	case http.StatusTooManyRequests,     // 429 - Rate limit
+		http.StatusInternalServerError,   // 500
+		http.StatusBadGateway,            // 502
+		http.StatusServiceUnavailable,    // 503
+		http.StatusGatewayTimeout:        // 504
+		return true
+	default:
+		return false
+	}
 }
