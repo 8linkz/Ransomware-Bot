@@ -22,15 +22,15 @@ type Tracker struct {
 	mutex     sync.RWMutex
 }
 
-// APIStatus represents status for ransomware API with two-phase tracking
+// APIStatus represents status for ransomware API with single-source tracking
+// Only SentItems is used for tracking - items are checked directly against sent status
 type APIStatus struct {
 	LastUpdated  time.Time                  `json:"last_updated"`
 	LastCheck    time.Time                  `json:"last_check"`
 	LastSuccess  *time.Time                 `json:"last_success"`
 	LastError    *string                    `json:"last_error"`
 	EntriesFound int                        `json:"entries_found"`
-	FetchedItems []StoredRansomwareEntry    `json:"fetched_items"` // Changed to slice for sorting
-	SentItems    map[string]WebhookSentInfo `json:"sent_items"`    // Items sent to webhooks (per webhook URL)
+	SentItems    map[string]WebhookSentInfo `json:"sent_items"` // Items sent to webhooks (per webhook URL)
 }
 
 // StoredRansomwareEntry represents a complete ransomware entry for storage
@@ -129,9 +129,8 @@ func NewTracker(dataDir string) (*Tracker, error) {
 // NewAPIStatus creates a new empty API status structure
 func NewAPIStatus() *APIStatus {
 	return &APIStatus{
-		LastUpdated:  time.Now(),
-		FetchedItems: make([]StoredRansomwareEntry, 0),
-		SentItems:    make(map[string]WebhookSentInfo),
+		LastUpdated: time.Now(),
+		SentItems:   make(map[string]WebhookSentInfo),
 	}
 }
 
@@ -225,91 +224,14 @@ func (t *Tracker) UpdateAPIStatus(success bool, entriesFound int, errorMsg strin
 	}
 }
 
-// IsAPIItemFetched checks if an API item was already fetched from the API
-func (t *Tracker) IsAPIItemFetched(itemKey string) bool {
+// IsAPIItemSentToWebhook checks if an API item was already sent to a specific webhook
+func (t *Tracker) IsAPIItemSentToWebhook(itemKey, webhookURL string) bool {
 	t.mutex.RLock()
 	defer t.mutex.RUnlock()
 
-	// Search through the slice for the key
-	for _, entry := range t.apiStatus.FetchedItems {
-		if entry.Key == itemKey {
-			return true
-		}
-	}
-	return false
-}
-
-// MarkAPIItemFetched marks an API item as fetched from the API with complete entry data
-func (t *Tracker) MarkAPIItemFetched(itemKey string, entry StoredRansomwareEntry) {
-	t.mutex.Lock()
-	defer t.mutex.Unlock()
-
-	// Ensure FetchedItems slice exists
-	if t.apiStatus.FetchedItems == nil {
-		t.apiStatus.FetchedItems = make([]StoredRansomwareEntry, 0)
-	}
-
-	// Check if entry already exists (avoid duplicates)
-	for i, existing := range t.apiStatus.FetchedItems {
-		if existing.Key == itemKey {
-			// Update existing entry
-			entry.Key = itemKey
-			t.apiStatus.FetchedItems[i] = entry
-			t.sortFetchedItems()
-			t.apiStatus.LastUpdated = time.Now()
-
-			// Save API status to file
-			if err := t.saveAPIStatus(); err != nil {
-				log.WithError(err).Error("Failed to save API status to file")
-			}
-			return
-		}
-	}
-
-	// Add new entry with key
-	entry.Key = itemKey
-	t.apiStatus.FetchedItems = append(t.apiStatus.FetchedItems, entry)
-
-	// Sort by discovered time (oldest first) to maintain chronological order
-	t.sortFetchedItems()
-
-	t.apiStatus.LastUpdated = time.Now()
-
-	// Clean up old entries
-	t.cleanupOldAPIFetchedItems()
-
-	// Save API status to file
-	if err := t.saveAPIStatus(); err != nil {
-		log.WithError(err).Error("Failed to save API status to file")
-	}
-}
-
-// sortFetchedItems sorts the fetched items by discovered time (oldest first)
-func (t *Tracker) sortFetchedItems() {
-	// Pre-parse all times to avoid parsing during sort comparison
-	type entryWithTime struct {
-		entry StoredRansomwareEntry
-		time  time.Time
-	}
-
-	items := make([]entryWithTime, len(t.apiStatus.FetchedItems))
-	for i, entry := range t.apiStatus.FetchedItems {
-		parsedTime, err := time.Parse("2006-01-02 15:04:05.999999", entry.Discovered)
-		if err != nil {
-			parsedTime, _ = time.Parse("2006-01-02 15:04:05", entry.Discovered)
-		}
-		items[i] = entryWithTime{entry, parsedTime}
-	}
-
-	// Sort by pre-parsed times
-	sort.Slice(items, func(i, j int) bool {
-		return items[i].time.Before(items[j].time)
-	})
-
-	// Reconstruct sorted slice
-	for i, item := range items {
-		t.apiStatus.FetchedItems[i] = item.entry
-	}
+	compositeKey := makeCompositeKey(itemKey, webhookURL)
+	_, exists := t.apiStatus.SentItems[compositeKey]
+	return exists
 }
 
 // IsAPIItemSent checks if an API item was already sent to ANY webhook (for API interface compatibility)
@@ -324,18 +246,6 @@ func (t *Tracker) IsAPIItemSent(itemKey string) bool {
 		}
 	}
 	return false
-}
-
-// IsAPIItemSentToWebhook checks if an API item was already sent to a specific webhook
-func (t *Tracker) IsAPIItemSentToWebhook(itemKey, webhookURL string) bool {
-	t.mutex.RLock()
-	defer t.mutex.RUnlock()
-
-	// Create composite key using secure hash
-	compositeKey := makeCompositeKey(itemKey, webhookURL)
-
-	_, sent := t.apiStatus.SentItems[compositeKey]
-	return sent
 }
 
 // MarkAPIItemSent marks an API item as sent to a webhook
@@ -360,92 +270,13 @@ func (t *Tracker) MarkAPIItemSent(itemKey, itemTitle, webhookURL string) {
 	}
 	t.apiStatus.LastUpdated = time.Now()
 
-	// Clean up old entries
-	t.cleanupOldAPISentItems()
-
 	// Save API status to file
+	// Note: Cleanup is done separately via CleanupOldEntries() for batch efficiency
 	if err := t.saveAPIStatus(); err != nil {
 		log.WithError(err).Error("Failed to save API status to file")
 	}
 }
 
-// IsAPIItemProcessed checks if an API item was already processed (for backward compatibility)
-func (t *Tracker) IsAPIItemProcessed(itemKey string) bool {
-	return t.IsAPIItemFetched(itemKey)
-}
-
-// MarkAPIItemProcessed marks an API item as processed (for backward compatibility)
-func (t *Tracker) MarkAPIItemProcessed(itemKey string, entry interface{}) {
-	// Convert interface{} to StoredRansomwareEntry for backward compatibility
-	if storedEntry, ok := entry.(StoredRansomwareEntry); ok {
-		t.MarkAPIItemFetched(itemKey, storedEntry)
-	} else {
-		log.WithField("item_key", itemKey).Warn("Invalid entry type for MarkAPIItemProcessed")
-	}
-}
-
-// GetUnsentAPIItems returns a map of complete API entries that were fetched but not yet sent (DEPRECATED)
-func (t *Tracker) GetUnsentAPIItems() map[string]StoredRansomwareEntry {
-	t.mutex.RLock()
-	defer t.mutex.RUnlock()
-
-	unsent := make(map[string]StoredRansomwareEntry)
-
-	// Check each fetched item to see if it was sent
-	for _, entry := range t.apiStatus.FetchedItems {
-		if _, sent := t.apiStatus.SentItems[entry.Key]; !sent {
-			unsent[entry.Key] = entry
-		}
-	}
-
-	return unsent
-}
-
-// GetUnsentAPIItemsSorted returns a sorted slice of complete API entries that were fetched but not yet sent to ANY webhook
-func (t *Tracker) GetUnsentAPIItemsSorted() []StoredRansomwareEntry {
-	t.mutex.RLock()
-	defer t.mutex.RUnlock()
-
-	// Build a set of sent item keys for O(1) lookup instead of O(n) for each item
-	sentKeys := make(map[string]bool, len(t.apiStatus.SentItems))
-	for _, info := range t.apiStatus.SentItems {
-		sentKeys[info.ItemKey] = true
-	}
-
-	var unsent []StoredRansomwareEntry
-
-	// Check each fetched item to see if it was sent to any webhook (items are already sorted by discovered time)
-	for _, entry := range t.apiStatus.FetchedItems {
-		if !sentKeys[entry.Key] {
-			unsent = append(unsent, entry)
-		}
-	}
-
-	log.WithField("unsent_count", len(unsent)).Debug("Retrieved unsent API items in chronological order")
-	return unsent
-}
-
-// GetUnsentAPIItemsForWebhook returns API entries not yet sent to a specific webhook
-func (t *Tracker) GetUnsentAPIItemsForWebhook(webhookURL string) []StoredRansomwareEntry {
-	t.mutex.RLock()
-	defer t.mutex.RUnlock()
-
-	var unsent []StoredRansomwareEntry
-
-	// Check each fetched item to see if it was sent to this specific webhook
-	for _, entry := range t.apiStatus.FetchedItems {
-		compositeKey := makeCompositeKey(entry.Key, webhookURL)
-		if _, sent := t.apiStatus.SentItems[compositeKey]; !sent {
-			unsent = append(unsent, entry)
-		}
-	}
-
-	log.WithFields(log.Fields{
-		"unsent_count": len(unsent),
-		"webhook_url":  webhookURL,
-	}).Debug("Retrieved unsent API items for specific webhook")
-	return unsent
-}
 
 // RSS Two-Phase Tracking Methods
 
@@ -503,10 +334,8 @@ func (t *Tracker) MarkRSSItemParsed(feedURL, itemKey string, entry StoredRSSEntr
 
 	t.rssStatus.LastUpdated = time.Now()
 
-	// Clean up old entries
-	t.cleanupOldRSSParsedItems()
-
 	// Save RSS status to file
+	// Note: Cleanup is done separately via CleanupOldEntries() for batch efficiency
 	if err := t.saveRSSStatus(); err != nil {
 		log.WithError(err).Error("Failed to save RSS status to file")
 	}
@@ -556,10 +385,8 @@ func (t *Tracker) MarkRSSItemSentToWebhook(itemKey, itemTitle, feedTitle, webhoo
 	}
 	t.rssStatus.LastUpdated = time.Now()
 
-	// Clean up old entries
-	t.cleanupOldRSSSentItems()
-
 	// Save RSS status to file
+	// Note: Cleanup is done separately via CleanupOldEntries() for batch efficiency
 	if err := t.saveRSSStatus(); err != nil {
 		log.WithError(err).Error("Failed to save RSS status to file")
 	}
@@ -615,6 +442,25 @@ func (t *Tracker) sortRSSParsedItems() {
 	for i, item := range items {
 		t.rssStatus.ParsedItems[i] = item.item
 	}
+}
+
+// CleanupOldEntries performs cleanup of old entries for both API and RSS status.
+// This should be called once after processing a batch of items, not after each individual item.
+// This approach is much more efficient than cleaning up after every single item (O(n) vs O(n*m)).
+func (t *Tracker) CleanupOldEntries() {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
+	// Cleanup API sent items
+	t.cleanupOldAPISentItems()
+
+	// Cleanup RSS parsed items
+	t.cleanupOldRSSParsedItems()
+
+	// Cleanup RSS sent items
+	t.cleanupOldRSSSentItems()
+
+	log.Debug("Completed batch cleanup of old entries")
 }
 
 // cleanupOldRSSParsedItems removes old parsed items
@@ -710,29 +556,10 @@ func (t *Tracker) MarkItemProcessed(feedURL, itemKey, itemTitle string) {
 	// The new two-phase system should be used instead
 }
 
-// cleanupOldAPIFetchedItems removes old fetched items
-func (t *Tracker) cleanupOldAPIFetchedItems() {
-	const maxFetchedItems = 1000 // Keep max 1000 fetched API items
-
-	currentLen := len(t.apiStatus.FetchedItems)
-	if currentLen > maxFetchedItems {
-		// Keep only the most recent items (slice is already sorted by time)
-		// Use copy to prevent memory leak from underlying array retention
-		startIdx := currentLen - maxFetchedItems
-		if startIdx < 0 {
-			startIdx = 0 // Safety check to prevent negative index
-		}
-		newSlice := make([]StoredRansomwareEntry, maxFetchedItems)
-		copy(newSlice, t.apiStatus.FetchedItems[startIdx:])
-		t.apiStatus.FetchedItems = newSlice
-		log.WithField("removed", currentLen-len(newSlice)).Debug("Cleaned up old API fetched items")
-	}
-}
-
 // cleanupOldAPISentItems removes old sent items based on count and age
 // NOTE: Must be called with t.mutex locked
 func (t *Tracker) cleanupOldAPISentItems() {
-	const maxSentItems = 1000         // Keep max 1000 sent API items
+	const maxSentItems = 100000       // Keep max 100000 sent API items (increased for multi-webhook support)
 	const maxAge = 30 * 24 * time.Hour // Keep max 30 days
 
 	// First, remove items older than maxAge
@@ -900,9 +727,6 @@ func (t *Tracker) loadAPIStatus() error {
 	}
 
 	// Ensure data structures exist
-	if loadedStatus.FetchedItems == nil {
-		loadedStatus.FetchedItems = make([]StoredRansomwareEntry, 0)
-	}
 	if loadedStatus.SentItems == nil {
 		loadedStatus.SentItems = make(map[string]WebhookSentInfo)
 	}
@@ -911,60 +735,17 @@ func (t *Tracker) loadAPIStatus() error {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
 
-	// Migrate old map-based storage to new slice-based storage if needed
-	t.migrateOldFormat(&loadedStatus)
-
-	// Sort fetched items by discovered time to ensure chronological order
 	t.apiStatus = &loadedStatus
-	t.sortFetchedItems()
-
-	// Count unsent items
-	unsentCount := 0
-	for _, entry := range t.apiStatus.FetchedItems {
-		if _, sent := t.apiStatus.SentItems[entry.Key]; !sent {
-			unsentCount++
-		}
-	}
 
 	log.WithFields(log.Fields{
-		"file":          filePath,
-		"last_updated":  t.apiStatus.LastUpdated,
-		"fetched_items": len(t.apiStatus.FetchedItems),
-		"sent_items":    len(t.apiStatus.SentItems),
-		"unsent_items":  unsentCount,
-	}).Info("API status loaded from file in chronological order")
+		"file":         filePath,
+		"last_updated": t.apiStatus.LastUpdated,
+		"sent_items":   len(t.apiStatus.SentItems),
+	}).Info("API status loaded from file")
 
 	return nil
 }
 
-// migrateOldFormat migrates old map-based storage to new slice-based storage
-func (t *Tracker) migrateOldFormat(status *APIStatus) {
-	// This handles migration from old map[string]StoredRansomwareEntry format
-	// to new []StoredRansomwareEntry format if the JSON contains the old format
-
-	// If we have an empty slice but the old format might be in the JSON,
-	// we'll just ensure the slice exists and is properly initialized
-	if status.FetchedItems == nil {
-		status.FetchedItems = make([]StoredRansomwareEntry, 0)
-	}
-
-	// Ensure all entries have keys
-	for i, entry := range status.FetchedItems {
-		if entry.Key == "" {
-			// Generate key from entry data
-			entry.Key = t.generateKeyFromEntry(entry)
-			status.FetchedItems[i] = entry
-		}
-	}
-}
-
-// generateKeyFromEntry generates a unique key for an entry (used in migration)
-func (t *Tracker) generateKeyFromEntry(entry StoredRansomwareEntry) string {
-	if entry.ID != "" {
-		return "id:" + entry.ID
-	}
-	return entry.Group + ":" + entry.Victim + ":" + entry.Discovered
-}
 
 // loadRSSStatus loads RSS status from JSON file if it exists
 func (t *Tracker) loadRSSStatus() error {
@@ -1030,15 +811,7 @@ func (t *Tracker) PrintSummary() {
 	defer t.mutex.RUnlock()
 
 	// Count API items
-	totalFetched := len(t.apiStatus.FetchedItems)
 	totalSent := len(t.apiStatus.SentItems)
-	totalUnsent := 0
-
-	for _, entry := range t.apiStatus.FetchedItems {
-		if _, sent := t.apiStatus.SentItems[entry.Key]; !sent {
-			totalUnsent++
-		}
-	}
 
 	// Count RSS items
 	totalRSSParsed := len(t.rssStatus.ParsedItems)
@@ -1052,25 +825,21 @@ func (t *Tracker) PrintSummary() {
 	}
 
 	log.WithFields(log.Fields{
-		"total_feeds":       len(t.rssStatus.Feeds),
-		"api_last_updated":  t.apiStatus.LastUpdated,
-		"rss_last_updated":  t.rssStatus.LastUpdated,
-		"api_fetched_items": totalFetched,
-		"api_sent_items":    totalSent,
-		"api_unsent_items":  totalUnsent,
-		"rss_parsed_items":  totalRSSParsed,
-		"rss_sent_items":    totalRSSSent,
-		"rss_unsent_items":  totalRSSUnsent,
-	}).Info("Status summary with two-phase tracking")
+		"total_feeds":      len(t.rssStatus.Feeds),
+		"api_last_updated": t.apiStatus.LastUpdated,
+		"rss_last_updated": t.rssStatus.LastUpdated,
+		"api_sent_items":   totalSent,
+		"rss_parsed_items": totalRSSParsed,
+		"rss_sent_items":   totalRSSSent,
+		"rss_unsent_items": totalRSSUnsent,
+	}).Info("Status summary")
 
 	// Log API status
 	if t.apiStatus.LastSuccess != nil {
 		log.WithFields(log.Fields{
 			"last_success":  *t.apiStatus.LastSuccess,
 			"entries_found": t.apiStatus.EntriesFound,
-			"fetched_items": len(t.apiStatus.FetchedItems),
 			"sent_items":    len(t.apiStatus.SentItems),
-			"unsent_items":  totalUnsent,
 		}).Info("API status details")
 	}
 
