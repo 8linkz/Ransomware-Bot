@@ -13,6 +13,7 @@
     "rss_poll_interval": "30m",
     "rss_retry_count": 3,
     "rss_retry_delay": "2s",
+    "rss_worker_timeout": "30s",
     "discord_delay": "2s",
     "discord_webhooks": {
         "ransomware": {

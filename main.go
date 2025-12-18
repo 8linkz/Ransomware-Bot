@@ -79,13 +79,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Test logging immediately after initialization
-	log.Info("=== Logger test from main.go ===")
-	log.WithField("test", "value").Debug("Debug log from main")
-	log.Error("Error log from main - this is a test")
-
-	// Log initial message using the standard logrus logger
-	log.WithField("version", Version).Info("Starting Discord Threat Intelligence Bot")
+	// Log initial message
+	log.WithField("version", Version).Info("Starting Threat Intelligence Bot")
 
 	// Create application context
 	ctx, cancel := context.WithCancel(context.Background())
@@ -119,6 +114,11 @@ func main() {
 
 	// Stop scheduler
 	sched.Stop()
+
+	// Close logger to flush and release log file
+	if err := logger.Close(); err != nil {
+		fmt.Printf("Warning: Failed to close logger: %v\n", err)
+	}
 
 	log.Info("Bot stopped successfully")
 }

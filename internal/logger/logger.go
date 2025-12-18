@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/sirupsen/logrus"
 )
@@ -17,6 +18,12 @@ type LogRotationConfig struct {
 	Compress   bool
 }
 
+// logFile holds the reference to the open log file for cleanup
+var (
+	logFile     *os.File
+	logFileMu   sync.Mutex
+)
+
 // NewLogger creates a new logger instance with file and console output
 // Sets the global logrus logger configuration
 func NewLogger(logLevel string, logFilePath string, rotationConfig LogRotationConfig) error {
@@ -28,9 +35,18 @@ func NewLogger(logLevel string, logFilePath string, rotationConfig LogRotationCo
 	logrus.SetLevel(level)
 
 	// Open log file with append mode
-	logFile, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open log file: %w", err)
+	logFileMu.Lock()
+	defer logFileMu.Unlock()
+
+	// Close previous log file if open
+	if logFile != nil {
+		logFile.Close()
+	}
+
+	var fileErr error
+	logFile, fileErr = os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if fileErr != nil {
+		return fmt.Errorf("failed to open log file: %w", fileErr)
 	}
 
 	// Set up multi-writer to write to both file and console
@@ -52,13 +68,21 @@ func NewLogger(logLevel string, logFilePath string, rotationConfig LogRotationCo
 		"max_backups": rotationConfig.MaxBackups,
 		"max_age":     fmt.Sprintf("%d days", rotationConfig.MaxAgeDays),
 		"compress":    rotationConfig.Compress,
-	}).Info("Logger initialized with simple file output")
+	}).Info("Logger initialized with file output")
 
-	// Test that file writing works
-	logrus.Info("Testing file write - this should appear in bot.log")
-	logrus.Debug("Debug message test - log level is " + logLevel)
-	logrus.Error("Error message test - logging system active")
+	return nil
+}
 
+// Close closes the log file and should be called during application shutdown
+func Close() error {
+	logFileMu.Lock()
+	defer logFileMu.Unlock()
+
+	if logFile != nil {
+		err := logFile.Close()
+		logFile = nil
+		return err
+	}
 	return nil
 }
 

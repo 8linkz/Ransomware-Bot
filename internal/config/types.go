@@ -20,9 +20,10 @@ type Config struct {
 	APIPollInterval time.Duration `json:"api_poll_interval"`
 	RSSPollInterval time.Duration `json:"rss_poll_interval"`
 	APIStartTime    string        `json:"api_start_time"`
-	RSSRetryCount   int           `json:"rss_retry_count"`
-	RSSRetryDelay   time.Duration `json:"rss_retry_delay"`
-	DiscordDelay    time.Duration    `json:"discord_delay"` // Configurable delay before Discord push
+	RSSRetryCount    int           `json:"rss_retry_count"`
+	RSSRetryDelay    time.Duration `json:"rss_retry_delay"`
+	RSSWorkerTimeout time.Duration `json:"rss_worker_timeout"` // Timeout for RSS worker pool results
+	DiscordDelay     time.Duration `json:"discord_delay"`      // Configurable delay before Discord push
 	DiscordWebhooks DiscordWebhooks `json:"discord_webhooks"`
 	SlackDelay      time.Duration   `json:"slack_delay"`    // Configurable delay before Slack push
 	SlackWebhooks   SlackWebhooks   `json:"slack_webhooks"`
@@ -92,9 +93,10 @@ type GeneralConfig struct {
 	APIPollInterval string      `json:"api_poll_interval"` // Will be parsed to time.Duration
 	RSSPollInterval string      `json:"rss_poll_interval"`
 	APIStartTime    string      `json:"api_start_time"`
-	RSSRetryCount   int             `json:"rss_retry_count"`
-	RSSRetryDelay   string          `json:"rss_retry_delay"`    // Will be parsed to time.Duration
-	DiscordDelay    string          `json:"discord_delay"`      // Will be parsed to time.Duration
+	RSSRetryCount    int    `json:"rss_retry_count"`
+	RSSRetryDelay    string `json:"rss_retry_delay"`    // Will be parsed to time.Duration
+	RSSWorkerTimeout string `json:"rss_worker_timeout"` // Will be parsed to time.Duration
+	DiscordDelay     string `json:"discord_delay"`      // Will be parsed to time.Duration
 	DiscordWebhooks DiscordWebhooks `json:"discord_webhooks"`
 	SlackDelay      string          `json:"slack_delay"`        // Will be parsed to time.Duration
 	SlackWebhooks   SlackWebhooks   `json:"slack_webhooks"`
@@ -114,9 +116,10 @@ func DefaultConfig() *Config {
 		APIPollInterval: time.Hour,
 		RSSPollInterval: 30 * time.Minute, // NEW: Default RSS poll interval
 		APIStartTime:    "",
-		RSSRetryCount:   3,
-		RSSRetryDelay:   2 * time.Second,
-		DiscordDelay:    2 * time.Second, // NEW: Default 2 seconds delay before Discord push
+		RSSRetryCount:    3,
+		RSSRetryDelay:    2 * time.Second,
+		RSSWorkerTimeout: 30 * time.Second, // Default 30 seconds timeout for RSS worker pool
+		DiscordDelay:     2 * time.Second,  // Default 2 seconds delay before Discord push
 		DiscordWebhooks: DiscordWebhooks{
 			Ransomware: WebhookConfig{Enabled: false, URL: ""},
 			RSS:        WebhookConfig{Enabled: false, URL: ""},

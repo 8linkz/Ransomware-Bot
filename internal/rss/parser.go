@@ -24,6 +24,7 @@ type Parser struct {
 	parser        *gofeed.Parser
 	retryCount    int
 	retryDelay    time.Duration
+	workerTimeout time.Duration // Timeout for worker pool results
 	statusTracker StatusTracker // Interface for persistent deduplication
 }
 
@@ -67,11 +68,12 @@ type workerPool struct {
 }
 
 // NewParser creates a new RSS parser with retry configuration
-func NewParser(retryCount int, retryDelay time.Duration, statusTracker StatusTracker) *Parser {
+func NewParser(retryCount int, retryDelay, workerTimeout time.Duration, statusTracker StatusTracker) *Parser {
 	return &Parser{
 		parser:        gofeed.NewParser(),
 		retryCount:    retryCount,
 		retryDelay:    retryDelay,
+		workerTimeout: workerTimeout,
 		statusTracker: statusTracker,
 	}
 }
@@ -374,8 +376,11 @@ func (wp *workerPool) processFeeds(ctx context.Context, feedURLs []string) (map[
 		case <-ctx.Done():
 			// Parent context cancelled - cancel workers and return
 			return nil, ctx.Err()
-		case <-time.After(30 * time.Second):
-			log.WithField("remaining_feeds", len(feedURLs)-i).Error("Worker pool timeout waiting for feed results")
+		case <-time.After(wp.parser.workerTimeout):
+			log.WithFields(log.Fields{
+				"remaining_feeds": len(feedURLs) - i,
+				"timeout":         wp.parser.workerTimeout,
+			}).Error("Worker pool timeout waiting for feed results")
 			// Cancel workers before returning to prevent goroutine leak
 			cancel()
 

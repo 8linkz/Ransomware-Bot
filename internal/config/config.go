@@ -141,6 +141,15 @@ func loadGeneralConfig(cfg *Config, configDir string) error {
 		cfg.SlackDelay = duration
 	}
 
+	// Parse RSS worker timeout duration
+	if generalCfg.RSSWorkerTimeout != "" {
+		duration, err := time.ParseDuration(generalCfg.RSSWorkerTimeout)
+		if err != nil {
+			return fmt.Errorf("invalid rss_worker_timeout format: %w", err)
+		}
+		cfg.RSSWorkerTimeout = duration
+	}
+
 	return nil
 }
 
@@ -218,6 +227,21 @@ func validateConfig(cfg *Config) error {
 		return fmt.Errorf("invalid log rotation max_age_days: %d (must be 0-365)", cfg.LogRotation.MaxAgeDays)
 	}
 
+	// Warn about potentially problematic log rotation configurations
+	if cfg.LogRotation.MaxBackups == 0 && cfg.LogRotation.MaxAgeDays == 0 {
+		log.Warn("Log rotation: max_backups=0 and max_age_days=0 will delete all old logs immediately")
+	}
+
+	// Warn about high disk usage potential
+	maxPotentialDiskUsageMB := cfg.LogRotation.MaxSizeMB * (cfg.LogRotation.MaxBackups + 1)
+	if maxPotentialDiskUsageMB > 5000 {
+		log.WithFields(log.Fields{
+			"max_size_mb":          cfg.LogRotation.MaxSizeMB,
+			"max_backups":          cfg.LogRotation.MaxBackups,
+			"potential_disk_usage": fmt.Sprintf("%dMB", maxPotentialDiskUsageMB),
+		}).Warn("Log rotation configuration may use significant disk space")
+	}
+
 	// Validate API key if any webhook is enabled
 	hasEnabledDiscordWebhook := cfg.DiscordWebhooks.Ransomware.Enabled || cfg.DiscordWebhooks.RSS.Enabled || cfg.DiscordWebhooks.Government.Enabled
 	hasEnabledSlackWebhook := cfg.SlackWebhooks.Ransomware.Enabled || cfg.SlackWebhooks.RSS.Enabled || cfg.SlackWebhooks.Government.Enabled
@@ -288,8 +312,18 @@ func validateConfig(cfg *Config) error {
 	}
 
 	// Validate retry count
+	if cfg.RSSRetryCount < 0 || cfg.RSSRetryCount > 10 {
+		return fmt.Errorf("rss_retry_count out of range: %d (must be 0-10)", cfg.RSSRetryCount)
+	}
+
+	// Validate RSS workers
 	if cfg.MaxRSSWorkers < 1 || cfg.MaxRSSWorkers > 10 {
 		return fmt.Errorf("max_rss_workers out of range: %d (must be 1-10)", cfg.MaxRSSWorkers)
+	}
+
+	// Validate RSS worker timeout
+	if cfg.RSSWorkerTimeout < 5*time.Second || cfg.RSSWorkerTimeout > 5*time.Minute {
+		return fmt.Errorf("rss_worker_timeout out of range: %v (must be 5s-5m)", cfg.RSSWorkerTimeout)
 	}
 
 	return nil
