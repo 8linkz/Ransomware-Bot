@@ -1,9 +1,10 @@
 {
     "ransomware_feeds": [],
     "government_feeds": [
-        "https://www.cisa.gov/uscert/ncas/alerts.xml",
+        "https://www.cisa.gov/cybersecurity-advisories/all.xml",
         "https://www.ncsc.gov.uk/api/1/services/v1/report-rss-feed.xml",
-        "https://www.cisecurity.org/feed/advisories"
+        "https://www.cisecurity.org/feed/advisories",
+        "https://www.cyber.gc.ca/api/cccs/rss/v1/get?feed=alerts_advisories&lang=en"
     ],
     "general_feeds": [
         "https://grahamcluley.com/feed/",
@@ -15,6 +16,9 @@
         "https://research.checkpoint.com/feed/",
         "https://www.proofpoint.com/us/rss.xml",
         "https://redcanary.com/feed/",
-        "https://www.sentinelone.com/feed/"
+        "https://www.sentinelone.com/feed/",
+        "https://www.microsoft.com/en-us/security/blog/feed/",
+        "https://blog.talosintelligence.com/rss/",
+        "https://isc.sans.edu/rssfeed_full.xml"
     ]
 }
