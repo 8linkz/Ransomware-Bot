@@ -454,84 +454,67 @@ func (t *Tracker) CleanupOldEntries() {
 	// Cleanup API sent items
 	t.cleanupOldAPISentItems()
 
-	// Cleanup RSS parsed items
-	t.cleanupOldRSSParsedItems()
-
-	// Cleanup RSS sent items
-	t.cleanupOldRSSSentItems()
+	// Cleanup RSS items (synchronized to prevent orphaned entries)
+	t.cleanupRSSItemsSynchronized()
 
 	log.Debug("Completed batch cleanup of old entries")
 }
 
-// cleanupOldRSSParsedItems removes old parsed items
-func (t *Tracker) cleanupOldRSSParsedItems() {
-	const maxParsedItems = 5000 // Keep max 5000 parsed RSS items
-
-	currentLen := len(t.rssStatus.ParsedItems)
-	if currentLen > maxParsedItems {
-		// Keep only the most recent items (slice is already sorted by time)
-		// Use copy to prevent memory leak from underlying array retention
-		startIdx := currentLen - maxParsedItems
-		if startIdx < 0 {
-			startIdx = 0 // Safety check to prevent negative index
-		}
-		newSlice := make([]StoredRSSEntry, maxParsedItems)
-		copy(newSlice, t.rssStatus.ParsedItems[startIdx:])
-		t.rssStatus.ParsedItems = newSlice
-		log.WithField("removed", currentLen-len(newSlice)).Debug("Cleaned up old RSS parsed items")
-	}
-}
-
-// cleanupOldRSSSentItems removes old sent RSS items based on count and age
+// cleanupRSSItemsSynchronized performs synchronized cleanup of both parsed_items and sent_items
+// to prevent orphaned entries that could cause duplicate sends.
 // NOTE: Must be called with t.mutex locked
-func (t *Tracker) cleanupOldRSSSentItems() {
-	const maxSentItems = 1000         // Keep max 1000 sent RSS items
-	const maxAge = 30 * 24 * time.Hour // Keep max 30 days
+func (t *Tracker) cleanupRSSItemsSynchronized() {
+	const maxItems = 10000
 
-	// First, remove items older than maxAge
-	now := time.Now()
-	removedByAge := 0
-	for k, v := range t.rssStatus.SentItems {
-		if now.Sub(v.SentAt) > maxAge {
-			delete(t.rssStatus.SentItems, k)
-			removedByAge++
+	initialParsedCount := len(t.rssStatus.ParsedItems)
+	initialSentCount := len(t.rssStatus.SentItems)
+
+	log.WithFields(log.Fields{
+		"parsed_items_count": initialParsedCount,
+		"sent_items_count":   initialSentCount,
+		"max_items":          maxItems,
+	}).Debug("Starting synchronized RSS cleanup")
+
+	// If parsed_items is under limit, nothing to do
+	if initialParsedCount <= maxItems {
+		log.Debug("RSS cleanup not needed - under limit")
+		return
+	}
+
+	// Keep only the newest maxItems in parsed_items
+	// (list is already sorted by time - oldest first)
+	startIdx := initialParsedCount - maxItems
+	itemsToRemove := t.rssStatus.ParsedItems[:startIdx]
+	t.rssStatus.ParsedItems = t.rssStatus.ParsedItems[startIdx:]
+
+	log.WithFields(log.Fields{
+		"items_to_remove":   len(itemsToRemove),
+		"oldest_item_key":   itemsToRemove[0].Key,
+		"oldest_item_title": itemsToRemove[0].Title,
+	}).Debug("Removing old parsed items")
+
+	// Remove corresponding entries from sent_items to keep lists synchronized
+	sentItemsRemoved := 0
+	for _, removedItem := range itemsToRemove {
+		// Find and delete all sent_items that belong to this parsed_item
+		for compositeKey, sentInfo := range t.rssStatus.SentItems {
+			if sentInfo.ItemKey == removedItem.Key {
+				delete(t.rssStatus.SentItems, compositeKey)
+				sentItemsRemoved++
+				log.WithFields(log.Fields{
+					"item_key":      removedItem.Key,
+					"composite_key": compositeKey,
+				}).Debug("Removed sent_item entry for deleted parsed_item")
+			}
 		}
 	}
 
-	if removedByAge > 0 {
-		log.WithField("removed", removedByAge).Debug("Cleaned up RSS sent items older than 30 days")
-	}
-
-	// Then apply count-based cleanup if still too many
-	if len(t.rssStatus.SentItems) > maxSentItems {
-		// Create slice of items with timestamps for sorting
-		type itemWithTime struct {
-			key  string
-			info RSSWebhookSentInfo
-		}
-		items := make([]itemWithTime, 0, len(t.rssStatus.SentItems))
-		for k, v := range t.rssStatus.SentItems {
-			items = append(items, itemWithTime{k, v})
-		}
-
-		// Sort by timestamp (oldest first)
-		sort.Slice(items, func(i, j int) bool {
-			return items[i].info.SentAt.Before(items[j].info.SentAt)
-		})
-
-		// Keep only the most recent maxSentItems
-		newMap := make(map[string]RSSWebhookSentInfo, maxSentItems)
-		startIdx := len(items) - maxSentItems
-		for i := startIdx; i < len(items); i++ {
-			newMap[items[i].key] = items[i].info
-		}
-		t.rssStatus.SentItems = newMap
-
-		log.WithFields(log.Fields{
-			"removed": len(items) - maxSentItems,
-			"kept":    maxSentItems,
-		}).Debug("Cleaned up old RSS sent items by count")
-	}
+	log.WithFields(log.Fields{
+		"parsed_items_removed": len(itemsToRemove),
+		"sent_items_removed":   sentItemsRemoved,
+		"parsed_items_kept":    len(t.rssStatus.ParsedItems),
+		"sent_items_kept":      len(t.rssStatus.SentItems),
+	}).Info("Synchronized RSS cleanup completed")
 }
 
 // Legacy RSS methods for backward compatibility
