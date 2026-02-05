@@ -2,20 +2,23 @@
 
 A high-performance bot written in **Go** that delivers ransomware alerts via **Discord** and **Slack** webhooks. The bot fetches data from the ransomware.live API and multiple RSS feeds, providing regular cybersecurity updates to your communication channels.
 
-The original bot from vx-underground no longer works, so I built a new one (https://github.com/vxunderground/ThreatIntelligenceDiscordBot).
+The original bot from vx-underground no longer works, so I built a new one (<https://github.com/vxunderground/ThreatIntelligenceDiscordBot>).
 
 ⚠️ Disclaimer
 This bot is 100% vibe-coded - I provide no guarantee for 100% security.
 
-<img width="524" height="377" alt="grafik" src="https://github.com/user-attachments/assets/699b63de-043e-40cc-9fb8-e396cf55ce79" />
+![grafik](https://github.com/user-attachments/assets/699b63de-043e-40cc-9fb8-e396cf55ce79)
 
 ## 🔧 Prerequisites
 
 ### API Key
-The ransomware.live API allows **3,000 calls per day** (API Pro). You need to request an API key at: https://www.ransomware.live/api
+
+The ransomware.live API allows **3,000 calls per day** (API Pro). You need to request an API key at: <https://www.ransomware.live/api>
 
 ### Discord Webhooks
+
 To create Discord webhooks:
+
 1. Go to your Discord server settings
 2. Navigate to "Integrations" → "Webhooks"
 3. Click "Create Webhook"
@@ -23,8 +26,10 @@ To create Discord webhooks:
 5. Add the URL to the configuration (see Configuration section below)
 
 ### Slack Webhooks
+
 To create Slack webhooks:
-1. Go to https://api.slack.com/apps
+
+1. Go to <https://api.slack.com/apps>
 2. Create a new app or select an existing one
 3. Navigate to "Incoming Webhooks" and activate it
 4. Click "Add New Webhook to Workspace"
@@ -89,7 +94,7 @@ To create Slack webhooks:
 **Configuration Options:**
 
 | Field | Description | Example |
-|-------|-------------|---------|
+| --- | --- | --- |
 | `log_level` | Logging verbosity | `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"` |
 | `api_key` | Ransomware.live API key | `"your-api-key-here"` |
 | `api_poll_interval` | API checking frequency | `"1h"`, `"30m"`, `"15m"` |
@@ -101,12 +106,12 @@ To create Slack webhooks:
 | `rss_retry_delay` | Delay between retries | `"2s"`, `"5s"`, `"10s"` |
 
 **Webhook Configuration:**
+
 - Both Discord and Slack support three separate webhooks for different alert types
 - `ransomware` - Alerts from ransomware.live API
 - `rss` - General cybersecurity RSS feeds
 - `government` - Government agency alerts (CISA, NCSC, etc.)
 - Each webhook can be independently enabled/disabled
-
 
 ### 2. RSS Feeds Configuration (configs/config_feeds.json)
 
@@ -114,9 +119,10 @@ To create Slack webhooks:
 {
   "ransomware_feeds": [],
   "government_feeds": [
-    "https://www.cisa.gov/uscert/ncas/alerts.xml",
+    "https://www.cisa.gov/cybersecurity-advisories/all.xml",
     "https://www.ncsc.gov.uk/api/1/services/v1/report-rss-feed.xml",
-    "https://www.cisecurity.org/feed/advisories"
+    "https://www.cisecurity.org/feed/advisories",
+    "https://www.cyber.gc.ca/api/cccs/rss/v1/get?feed=alerts_advisories&lang=en"
   ],
   "general_feeds": [
     "https://grahamcluley.com/feed/",
@@ -128,14 +134,18 @@ To create Slack webhooks:
     "https://research.checkpoint.com/feed/",
     "https://www.proofpoint.com/us/rss.xml",
     "https://redcanary.com/feed/",
-    "https://www.sentinelone.com/feed/"
+    "https://www.sentinelone.com/feed/",
+    "https://www.microsoft.com/en-us/security/blog/feed/",
+    "https://blog.talosintelligence.com/rss/",
+    "https://isc.sans.edu/rssfeed_full.xml"
   ]
 }
 ```
 
 **Feed Categories:**
+
 - `ransomware_feeds` - RSS feeds specific to ransomware threats (routed to ransomware webhook)
-- `government_feeds` - Government cybersecurity alerts (routed to government webhook)  
+- `government_feeds` - Government cybersecurity alerts (routed to government webhook)
 - `general_feeds` - General cybersecurity news and research (routed to RSS webhook)
 
 💡 **Tip**: You can easily add, remove, or modify feed URLs in any category to customize your threat intelligence sources.
@@ -177,6 +187,7 @@ To create Slack webhooks:
 ```
 
 **Formatting Options:**
+
 - `show_unicode_flags` - Display country flag emojis (🇺🇸, 🇩🇪, etc.)
 - `field_order` - Field order for Discord messages
 - `slack.title_text` - Custom title for Slack ransomware alerts
@@ -186,6 +197,7 @@ To create Slack webhooks:
 💡 **Tip**: You can reorder fields or remove unwanted ones from the `field_order` arrays to customize your message layout. Slack and Discord can have different field orders.
 
 **Available Fields (if available):**
+
 - `id` - Unique entry identifier
 - `victim` - Target organization
 - `group` - Ransomware group name
@@ -201,8 +213,8 @@ To create Slack webhooks:
 
 ## 📦 Docker Compatibility
 
-✅ **Tested on Unraid**: This container has been successfully tested on Unraid without any issues.  
-✅ **Lightweight**: Docker image size is approximately ~36MB
+✅ **Tested on Unraid**: This container has been successfully tested on Unraid without any issues.
+✅ **Lightweight**: Docker image size is approximately ~28MB
 
 ### Building the Container
 
@@ -222,19 +234,22 @@ docker-compose up -d --build
 ```
 
 ### Required Volume Mounts
-* **Configuration**: `/app/config` - Mount your config directory here
-* **Logs**: `/app/logs` - Application logs with rotation  
-* **Data**: `/app/data` - **Critical for persistence** (status tracking/deduplication)
+
+- **Configuration**: `/app/config` - Mount your config directory here
+- **Logs**: `/app/logs` - Application logs with rotation
+- **Data**: `/app/data` - **Critical for persistence** (status tracking/deduplication)
 
 ⚠️ **Important**: Without the `/app/data` volume, all processed items tracking will be lost on container restart, causing duplicate Discord messages.
 
 ## 🎨 Platform Support
 
 Both Discord and Slack are fully supported with the same ransomware data. The only difference:
+
 - **Discord**: Supports emoji in messages (including country flags 🇺🇸🇩🇪)
 - **Slack**: Uses Block Kit formatting without emoji support
 
 Both platforms:
+
 - Receive identical ransomware alerts and RSS feeds
 - Support customizable field ordering
 - Defang malicious URLs (http → hxxp) for security
