@@ -16,7 +16,6 @@ logs/
 settings.local.json
 
 # Config files with secrets
-config_general.json
 .env
 .env.local
 *.secret
