@@ -29,14 +29,15 @@ import (
 )
 
 // Application version
-const Version = "1.0.0"
+const Version = "1.1.0"
 
 func main() {
 	// Parse command line flags
-	// -config-dir: Directory containing JSON configuration files (default: ./configs)
-	// -version: Display version information and exit
 	configDir := flag.String("config-dir", "./configs", "Directory containing configuration files")
+	dataDir := flag.String("data-dir", "", "Directory for persistent data (overrides config and DATA_DIR env)")
 	version := flag.Bool("version", false, "Show version information")
+	checkConfig := flag.Bool("check-config", false, "Validate configuration and exit")
+	dryRun := flag.Bool("dry-run", false, "Preview mode: format messages and log them without sending")
 	flag.Parse()
 
 	// Show version and exit if requested
@@ -46,10 +47,20 @@ func main() {
 	}
 
 	// Validate config directory exists
-	// Exit early if configuration cannot be loaded
 	if _, err := os.Stat(*configDir); os.IsNotExist(err) {
 		fmt.Printf("Error: Config directory '%s' does not exist\n", *configDir)
 		os.Exit(1)
+	}
+
+	// Check-config mode: validate and exit
+	if *checkConfig {
+		_, err := config.LoadConfig(*configDir)
+		if err != nil {
+			fmt.Printf("Configuration INVALID: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("Configuration OK")
+		os.Exit(0)
 	}
 
 	// Load configuration
@@ -58,6 +69,14 @@ func main() {
 		fmt.Printf("Error loading configuration: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Override DataDir: flag > env > config > default
+	resolved, err := resolveDataDir(*dataDir, cfg.DataDir)
+	if err != nil {
+		fmt.Printf("Error resolving data-dir path: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.DataDir = resolved
 
 	// Setup logging
 	logDir := "./logs"
@@ -82,14 +101,29 @@ func main() {
 	// Log initial message
 	log.WithField("version", Version).Info("Starting Threat Intelligence Bot")
 
+	if *dryRun {
+		log.Info("Dry-run mode enabled: messages will be logged but not sent")
+	}
+
 	// Create application context
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Initialize scheduler
-	sched, err := scheduler.New(cfg)
+	sched, err := scheduler.New(cfg, *configDir, *dryRun)
 	if err != nil {
 		log.WithError(err).Fatal("Failed to initialize scheduler")
+	}
+
+	// Dry-run mode: run single cycle and exit
+	if *dryRun {
+		sched.RunOnce(ctx)
+		sched.Stop()
+		if err := logger.Close(); err != nil {
+			fmt.Printf("Warning: Failed to close logger: %v\n", err)
+		}
+		log.Info("Dry-run completed")
+		os.Exit(0)
 	}
 
 	// Start scheduler
@@ -122,3 +156,17 @@ func main() {
 
 	log.Info("Bot stopped successfully")
 }
+
+// resolveDataDir determines the final DataDir value using the priority:
+// flag > DATA_DIR env > config value.
+// All non-empty paths are resolved to absolute paths.
+func resolveDataDir(flagVal, configVal string) (string, error) {
+	if flagVal != "" {
+		return filepath.Abs(flagVal)
+	}
+	if envDir := os.Getenv("DATA_DIR"); envDir != "" {
+		return filepath.Abs(envDir)
+	}
+	return configVal, nil
+}
+

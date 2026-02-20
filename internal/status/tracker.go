@@ -16,10 +16,54 @@ import (
 
 // Tracker handles status tracking and persistence with separate files for API and RSS
 type Tracker struct {
-	apiStatus *APIStatus
-	rssStatus *RSSStatus
-	dataDir   string
-	mutex     sync.RWMutex
+	apiStatus   *APIStatus
+	rssStatus   *RSSStatus
+	retryStatus *RetryStatus
+	dataDir     string
+	mutex       sync.RWMutex
+
+	// Performance: O(1) lookup index for parsed RSS items
+	// Key: feedURL + "\x00" + itemKey → index in ParsedItems slice
+	parsedIndex map[string]int
+
+	// Dirty flags for batched persistence (reduces disk I/O from per-item to per-batch)
+	rssDirty        bool // RSS status needs saving to disk
+	apiDirty        bool // API status needs saving to disk
+	retryDirty      bool // Retry status needs saving to disk
+	parsedSortDirty bool // ParsedItems need re-sorting before read/save
+}
+
+// RetryStatus holds the persistent retry queue and dead letter storage.
+type RetryStatus struct {
+	LastUpdated    time.Time              `json:"last_updated"`
+	RetryQueue     map[string]RetryItem   `json:"retry_queue"`      // compositeKey → item
+	DeadLetterItems []DeadLetterItem      `json:"dead_letter_items"`
+}
+
+// RetryItem represents a failed webhook send queued for retry.
+type RetryItem struct {
+	ItemKey     string          `json:"item_key"`
+	WebhookURL  string          `json:"-"`                    // not persisted (security)
+	Messenger   string          `json:"messenger"`            // "discord" or "slack"
+	ItemType    string          `json:"item_type"`            // "api" or "rss"
+	Title       string          `json:"title"`
+	RetryCount  int             `json:"retry_count"`
+	LastError   string          `json:"last_error"`
+	FirstFailed string          `json:"first_failed"`
+	LastRetried string          `json:"last_retried"`
+	Payload     json.RawMessage `json:"payload,omitempty"`    // Serialized entry data for retry (API items only)
+}
+
+// DeadLetterItem is a send that permanently failed after exhausting all retries.
+type DeadLetterItem struct {
+	ItemKey     string `json:"item_key"`
+	ItemType    string `json:"item_type"`
+	Messenger   string `json:"messenger"`
+	Title       string `json:"title"`
+	RetryCount  int    `json:"retry_count"`
+	LastError   string `json:"last_error"`
+	FirstFailed string `json:"first_failed"`
+	DeadAt      string `json:"dead_at"`
 }
 
 // APIStatus represents status for ransomware API with single-source tracking
@@ -31,23 +75,6 @@ type APIStatus struct {
 	LastError    *string                    `json:"last_error"`
 	EntriesFound int                        `json:"entries_found"`
 	SentItems    map[string]WebhookSentInfo `json:"sent_items"` // Items sent to webhooks (per webhook URL)
-}
-
-// StoredRansomwareEntry represents a complete ransomware entry for storage
-type StoredRansomwareEntry struct {
-	Key         string `json:"key"` // Unique key for tracking
-	ID          string `json:"id"`
-	Group       string `json:"group"`
-	Victim      string `json:"victim"`
-	Country     string `json:"country"`
-	Activity    string `json:"activity"`
-	AttackDate  string `json:"attackdate"`
-	Discovered  string `json:"discovered"` // Store as string for JSON compatibility
-	ClaimURL    string `json:"post_url"`
-	URL         string `json:"website"`
-	Description string `json:"description"`
-	Screenshot  string `json:"screenshot"`
-	Published   string `json:"published"` // Store as string for JSON compatibility
 }
 
 // WebhookSentInfo contains information about items sent to webhooks
@@ -101,6 +128,11 @@ func makeCompositeKey(itemKey, webhookURL string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// parsedIndexKey creates a lookup key for the parsedIndex map
+func parsedIndexKey(feedURL, itemKey string) string {
+	return feedURL + "\x00" + itemKey
+}
+
 // NewTracker creates a new status tracker instance with separate files
 func NewTracker(dataDir string) (*Tracker, error) {
 	// Create data directory if it doesn't exist
@@ -109,9 +141,11 @@ func NewTracker(dataDir string) (*Tracker, error) {
 	}
 
 	tracker := &Tracker{
-		dataDir:   dataDir,
-		apiStatus: NewAPIStatus(),
-		rssStatus: NewRSSStatus(),
+		dataDir:     dataDir,
+		apiStatus:   NewAPIStatus(),
+		rssStatus:   NewRSSStatus(),
+		retryStatus: NewRetryStatus(),
+		parsedIndex: make(map[string]int),
 	}
 
 	// Load existing status files if they exist
@@ -123,7 +157,20 @@ func NewTracker(dataDir string) (*Tracker, error) {
 		log.WithError(err).Warn("Failed to load existing RSS status, starting fresh")
 	}
 
+	if err := tracker.loadRetryStatus(); err != nil {
+		log.WithError(err).Warn("Failed to load existing retry status, starting fresh")
+	}
+
 	return tracker, nil
+}
+
+// NewRetryStatus creates a new empty retry status structure.
+func NewRetryStatus() *RetryStatus {
+	return &RetryStatus{
+		LastUpdated:     time.Now(),
+		RetryQueue:      make(map[string]RetryItem),
+		DeadLetterItems: make([]DeadLetterItem, 0),
+	}
 }
 
 // NewAPIStatus creates a new empty API status structure
@@ -234,20 +281,6 @@ func (t *Tracker) IsAPIItemSentToWebhook(itemKey, webhookURL string) bool {
 	return exists
 }
 
-// IsAPIItemSent checks if an API item was already sent to ANY webhook (for API interface compatibility)
-func (t *Tracker) IsAPIItemSent(itemKey string) bool {
-	t.mutex.RLock()
-	defer t.mutex.RUnlock()
-
-	// Check if sent to any webhook by looking at ItemKey field
-	for _, info := range t.apiStatus.SentItems {
-		if info.ItemKey == itemKey {
-			return true
-		}
-	}
-	return false
-}
-
 // MarkAPIItemSent marks an API item as sent to a webhook
 func (t *Tracker) MarkAPIItemSent(itemKey, itemTitle, webhookURL string) {
 	t.mutex.Lock()
@@ -269,32 +302,23 @@ func (t *Tracker) MarkAPIItemSent(itemKey, itemTitle, webhookURL string) {
 		WebhookURL: webhookURL,
 	}
 	t.apiStatus.LastUpdated = time.Now()
-
-	// Save API status to file
-	// Note: Cleanup is done separately via CleanupOldEntries() for batch efficiency
-	if err := t.saveAPIStatus(); err != nil {
-		log.WithError(err).Error("Failed to save API status to file")
-	}
+	t.apiDirty = true
 }
 
 
 // RSS Two-Phase Tracking Methods
 
-// IsRSSItemParsed checks if an RSS item was already parsed from feed
+// IsRSSItemParsed checks if an RSS item was already parsed from feed (O(1) via index)
 func (t *Tracker) IsRSSItemParsed(feedURL, itemKey string) bool {
 	t.mutex.RLock()
 	defer t.mutex.RUnlock()
 
-	// Search through the slice for the key
-	for _, entry := range t.rssStatus.ParsedItems {
-		if entry.Key == itemKey && entry.FeedURL == feedURL {
-			return true
-		}
-	}
-	return false
+	_, exists := t.parsedIndex[parsedIndexKey(feedURL, itemKey)]
+	return exists
 }
 
-// MarkRSSItemParsed marks an RSS item as parsed from feed with complete entry data
+// MarkRSSItemParsed marks an RSS item as parsed from feed with complete entry data.
+// Uses O(1) index lookup for duplicates and defers sorting/saving for batch efficiency.
 func (t *Tracker) MarkRSSItemParsed(feedURL, itemKey string, entry StoredRSSEntry) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
@@ -304,62 +328,23 @@ func (t *Tracker) MarkRSSItemParsed(feedURL, itemKey string, entry StoredRSSEntr
 		t.rssStatus.ParsedItems = make([]StoredRSSEntry, 0)
 	}
 
-	// Check if entry already exists (avoid duplicates)
-	for i, existing := range t.rssStatus.ParsedItems {
-		if existing.Key == itemKey && existing.FeedURL == feedURL {
-			// Update existing entry
-			entry.Key = itemKey
-			entry.FeedURL = feedURL
-			entry.ParsedAt = time.Now().Format("2006-01-02 15:04:05.999999")
-			t.rssStatus.ParsedItems[i] = entry
-			t.sortRSSParsedItems()
-			t.rssStatus.LastUpdated = time.Now()
-
-			// Save RSS status to file
-			if err := t.saveRSSStatus(); err != nil {
-				log.WithError(err).Error("Failed to save RSS status to file")
-			}
-			return
-		}
-	}
-
-	// Add new entry with metadata
 	entry.Key = itemKey
 	entry.FeedURL = feedURL
 	entry.ParsedAt = time.Now().Format("2006-01-02 15:04:05.999999")
-	t.rssStatus.ParsedItems = append(t.rssStatus.ParsedItems, entry)
 
-	// Sort by published time (oldest first) to maintain chronological order
-	t.sortRSSParsedItems()
+	idxKey := parsedIndexKey(feedURL, itemKey)
+	if idx, exists := t.parsedIndex[idxKey]; exists {
+		// Update existing entry at known index (O(1))
+		t.rssStatus.ParsedItems[idx] = entry
+	} else {
+		// Append new entry and record index (O(1))
+		t.parsedIndex[idxKey] = len(t.rssStatus.ParsedItems)
+		t.rssStatus.ParsedItems = append(t.rssStatus.ParsedItems, entry)
+	}
 
 	t.rssStatus.LastUpdated = time.Now()
-
-	// Save RSS status to file
-	// Note: Cleanup is done separately via CleanupOldEntries() for batch efficiency
-	if err := t.saveRSSStatus(); err != nil {
-		log.WithError(err).Error("Failed to save RSS status to file")
-	}
-}
-
-// IsRSSItemSent checks if an RSS item was already sent to Discord
-func (t *Tracker) IsRSSItemSent(itemKey string) bool {
-	t.mutex.RLock()
-	defer t.mutex.RUnlock()
-
-	// Check if this item was sent by looking for ItemKey match
-	for _, sentInfo := range t.rssStatus.SentItems {
-		if sentInfo.ItemKey == itemKey {
-			return true
-		}
-	}
-	return false
-}
-
-// MarkRSSItemSent marks an RSS item as sent to a webhook (LEGACY - uses composite key internally)
-func (t *Tracker) MarkRSSItemSent(itemKey, itemTitle, feedTitle string) {
-	// For backward compatibility, we'll assume this is for the "default" webhook
-	// In practice, this should use MarkRSSItemSentToWebhook instead
-	t.MarkRSSItemSentToWebhook(itemKey, itemTitle, feedTitle, "")
+	t.parsedSortDirty = true
+	t.rssDirty = true
 }
 
 // MarkRSSItemSentToWebhook marks an RSS item as sent to a specific webhook
@@ -384,36 +369,88 @@ func (t *Tracker) MarkRSSItemSentToWebhook(itemKey, itemTitle, feedTitle, webhoo
 		WebhookURL: webhookURL, // Store for lookups
 	}
 	t.rssStatus.LastUpdated = time.Now()
-
-	// Save RSS status to file
-	// Note: Cleanup is done separately via CleanupOldEntries() for batch efficiency
-	if err := t.saveRSSStatus(); err != nil {
-		log.WithError(err).Error("Failed to save RSS status to file")
-	}
+	t.rssDirty = true
 }
 
-// GetUnsentRSSItemsSorted returns a sorted slice of RSS entries that were parsed but not yet sent
-func (t *Tracker) GetUnsentRSSItemsSorted() []StoredRSSEntry {
+// IsRSSItemSentToWebhook checks if an RSS item was already sent to a specific webhook
+func (t *Tracker) IsRSSItemSentToWebhook(itemKey, webhookURL string) bool {
 	t.mutex.RLock()
 	defer t.mutex.RUnlock()
 
-	// Build a set of sent item keys for O(1) lookup instead of O(n) for each item
-	sentKeys := make(map[string]bool, len(t.rssStatus.SentItems))
-	for _, sentInfo := range t.rssStatus.SentItems {
-		sentKeys[sentInfo.ItemKey] = true
-	}
+	compositeKey := makeCompositeKey(itemKey, webhookURL)
+	_, exists := t.rssStatus.SentItems[compositeKey]
+	return exists
+}
+
+// GetUnsentRSSItemsForWebhook returns RSS entries not yet sent to a specific webhook, sorted chronologically.
+// Uses write lock to allow deferred sorting if needed.
+func (t *Tracker) GetUnsentRSSItemsForWebhook(webhookURL string) []StoredRSSEntry {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
+	t.ensureSorted()
 
 	var unsent []StoredRSSEntry
-
-	// Check each parsed item to see if it was sent (items are already sorted by published time)
 	for _, entry := range t.rssStatus.ParsedItems {
-		if !sentKeys[entry.Key] {
+		compositeKey := makeCompositeKey(entry.Key, webhookURL)
+		if _, exists := t.rssStatus.SentItems[compositeKey]; !exists {
 			unsent = append(unsent, entry)
 		}
 	}
 
-	log.WithField("unsent_count", len(unsent)).Debug("Retrieved unsent RSS items in chronological order")
+	log.WithFields(log.Fields{
+		"unsent_count": len(unsent),
+	}).Debug("Retrieved unsent RSS items for webhook")
 	return unsent
+}
+
+// ensureSorted sorts ParsedItems if the sort-dirty flag is set, then rebuilds the index.
+// NOTE: Must be called with t.mutex locked (write).
+func (t *Tracker) ensureSorted() {
+	if !t.parsedSortDirty {
+		return
+	}
+	t.sortRSSParsedItems()
+	t.rebuildParsedIndex()
+	t.parsedSortDirty = false
+}
+
+// rebuildParsedIndex rebuilds the O(1) lookup index from the ParsedItems slice.
+// NOTE: Must be called with t.mutex locked.
+func (t *Tracker) rebuildParsedIndex() {
+	t.parsedIndex = make(map[string]int, len(t.rssStatus.ParsedItems))
+	for i, entry := range t.rssStatus.ParsedItems {
+		t.parsedIndex[parsedIndexKey(entry.FeedURL, entry.Key)] = i
+	}
+}
+
+// SavePendingChanges flushes any dirty in-memory state to disk.
+// Call this after batch operations (parse cycle, send cycle) to persist changes.
+func (t *Tracker) SavePendingChanges() {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
+	if t.rssDirty {
+		t.ensureSorted()
+		if err := t.saveRSSStatus(); err != nil {
+			log.WithError(err).Error("Failed to save pending RSS status")
+		}
+		t.rssDirty = false
+	}
+
+	if t.apiDirty {
+		if err := t.saveAPIStatus(); err != nil {
+			log.WithError(err).Error("Failed to save pending API status")
+		}
+		t.apiDirty = false
+	}
+
+	if t.retryDirty {
+		if err := t.saveRetryStatus(); err != nil {
+			log.WithError(err).Error("Failed to save pending retry status")
+		}
+		t.retryDirty = false
+	}
 }
 
 // sortRSSParsedItems sorts the parsed RSS items by published time (oldest first)
@@ -509,6 +546,10 @@ func (t *Tracker) cleanupRSSItemsSynchronized() {
 		}
 	}
 
+	// Rebuild index after slice modification
+	t.rebuildParsedIndex()
+	t.rssDirty = true
+
 	log.WithFields(log.Fields{
 		"parsed_items_removed": len(itemsToRemove),
 		"sent_items_removed":   sentItemsRemoved,
@@ -556,6 +597,7 @@ func (t *Tracker) cleanupOldAPISentItems() {
 	}
 
 	if removedByAge > 0 {
+		t.apiDirty = true
 		log.WithField("removed", removedByAge).Debug("Cleaned up API sent items older than 30 days")
 	}
 
@@ -583,29 +625,13 @@ func (t *Tracker) cleanupOldAPISentItems() {
 			newMap[items[i].key] = items[i].info
 		}
 		t.apiStatus.SentItems = newMap
+		t.apiDirty = true
 
 		log.WithFields(log.Fields{
 			"removed": len(items) - maxSentItems,
 			"kept":    maxSentItems,
 		}).Debug("Cleaned up old API sent items by count")
 	}
-}
-
-// GetFeedStatus returns status for a specific feed
-func (t *Tracker) GetFeedStatus(feedURL string) (FeedInfo, bool) {
-	t.mutex.RLock()
-	defer t.mutex.RUnlock()
-
-	feedInfo, exists := t.rssStatus.Feeds[feedURL]
-	return feedInfo, exists
-}
-
-// GetAPIStatus returns the current API status
-func (t *Tracker) GetAPIStatus() APIStatus {
-	t.mutex.RLock()
-	defer t.mutex.RUnlock()
-
-	return *t.apiStatus
 }
 
 // saveAPIStatus saves the API status to JSON file
@@ -767,11 +793,18 @@ func (t *Tracker) loadRSSStatus() error {
 	// Sort parsed items by published time to ensure chronological order
 	t.rssStatus = &loadedStatus
 	t.sortRSSParsedItems()
+	t.rebuildParsedIndex()
+
+	// Build set of sent item keys for correct lookup (SentItems uses composite keys, not item keys)
+	sentKeys := make(map[string]bool, len(t.rssStatus.SentItems))
+	for _, sentInfo := range t.rssStatus.SentItems {
+		sentKeys[sentInfo.ItemKey] = true
+	}
 
 	// Count unsent items
 	unsentCount := 0
 	for _, entry := range t.rssStatus.ParsedItems {
-		if _, sent := t.rssStatus.SentItems[entry.Key]; !sent {
+		if !sentKeys[entry.Key] {
 			unsentCount++
 		}
 	}
@@ -788,67 +821,192 @@ func (t *Tracker) loadRSSStatus() error {
 	return nil
 }
 
-// PrintSummary logs a summary of the current status
-func (t *Tracker) PrintSummary() {
+// --- Retry Queue & Dead Letter Methods ---
+
+// EnqueueRetry adds or updates a failed item in the retry queue.
+// Returns true if the item was added/updated, false if it was moved to dead letter.
+// Optional payload stores serialized entry data for retry when original source is unavailable.
+func (t *Tracker) EnqueueRetry(itemKey, webhookURL, messenger, itemType, title, lastError string, maxAttempts int, retryWindow time.Duration, payload ...[]byte) bool {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
+	compositeKey := makeCompositeKey(itemKey, webhookURL)
+	now := time.Now()
+	nowStr := now.Format("2006-01-02 15:04:05")
+
+	existing, exists := t.retryStatus.RetryQueue[compositeKey]
+	if exists {
+		existing.RetryCount++
+		existing.LastError = lastError
+		existing.LastRetried = nowStr
+		// Payload is preserved from first enqueue — entry data doesn't change
+
+		// Check if max attempts exceeded
+		if maxAttempts > 0 && existing.RetryCount >= maxAttempts {
+			t.moveToDeadLetterLocked(compositeKey, existing)
+			return false
+		}
+
+		// Check if retry window exceeded
+		if retryWindow > 0 {
+			firstFailed, err := time.Parse("2006-01-02 15:04:05", existing.FirstFailed)
+			if err == nil && now.Sub(firstFailed) > retryWindow {
+				t.moveToDeadLetterLocked(compositeKey, existing)
+				return false
+			}
+		}
+
+		t.retryStatus.RetryQueue[compositeKey] = existing
+	} else {
+		item := RetryItem{
+			ItemKey:     itemKey,
+			WebhookURL:  webhookURL,
+			Messenger:   messenger,
+			ItemType:    itemType,
+			Title:       title,
+			RetryCount:  1,
+			LastError:   lastError,
+			FirstFailed: nowStr,
+			LastRetried: nowStr,
+		}
+		if len(payload) > 0 && payload[0] != nil {
+			item.Payload = json.RawMessage(payload[0])
+		}
+		t.retryStatus.RetryQueue[compositeKey] = item
+	}
+
+	t.retryStatus.LastUpdated = now
+	t.retryDirty = true
+	return true
+}
+
+// RemoveFromRetryQueue removes an item from the retry queue (after successful send).
+func (t *Tracker) RemoveFromRetryQueue(itemKey, webhookURL string) {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
+	compositeKey := makeCompositeKey(itemKey, webhookURL)
+	if _, exists := t.retryStatus.RetryQueue[compositeKey]; exists {
+		delete(t.retryStatus.RetryQueue, compositeKey)
+		t.retryStatus.LastUpdated = time.Now()
+		t.retryDirty = true
+	}
+}
+
+// GetRetryItemsByType returns all items in the retry queue for a given item type,
+// regardless of webhook URL (which is not persisted for security).
+func (t *Tracker) GetRetryItemsByType(itemType string) []RetryItem {
 	t.mutex.RLock()
 	defer t.mutex.RUnlock()
 
-	// Count API items
-	totalSent := len(t.apiStatus.SentItems)
-
-	// Count RSS items
-	totalRSSParsed := len(t.rssStatus.ParsedItems)
-	totalRSSSent := len(t.rssStatus.SentItems)
-	totalRSSUnsent := 0
-
-	for _, entry := range t.rssStatus.ParsedItems {
-		if _, sent := t.rssStatus.SentItems[entry.Key]; !sent {
-			totalRSSUnsent++
+	var items []RetryItem
+	for _, item := range t.retryStatus.RetryQueue {
+		if item.ItemType == itemType {
+			items = append(items, item)
 		}
 	}
-
-	log.WithFields(log.Fields{
-		"total_feeds":      len(t.rssStatus.Feeds),
-		"api_last_updated": t.apiStatus.LastUpdated,
-		"rss_last_updated": t.rssStatus.LastUpdated,
-		"api_sent_items":   totalSent,
-		"rss_parsed_items": totalRSSParsed,
-		"rss_sent_items":   totalRSSSent,
-		"rss_unsent_items": totalRSSUnsent,
-	}).Info("Status summary")
-
-	// Log API status
-	if t.apiStatus.LastSuccess != nil {
-		log.WithFields(log.Fields{
-			"last_success":  *t.apiStatus.LastSuccess,
-			"entries_found": t.apiStatus.EntriesFound,
-			"sent_items":    len(t.apiStatus.SentItems),
-		}).Info("API status details")
-	}
-
-	// Log RSS status
-	log.WithFields(log.Fields{
-		"parsed_items": len(t.rssStatus.ParsedItems),
-		"sent_items":   len(t.rssStatus.SentItems),
-		"unsent_items": totalRSSUnsent,
-	}).Info("RSS status details with two-phase tracking")
-
-	// Log feed statuses
-	for feedURL, feedInfo := range t.rssStatus.Feeds {
-		fields := log.Fields{
-			"feed_url":     feedURL,
-			"success_rate": fmt.Sprintf("%.1f%%", feedInfo.SuccessRate*100),
-			"last_check":   feedInfo.LastCheck,
-		}
-
-		if feedInfo.LastSuccess != nil {
-			fields["last_success"] = *feedInfo.LastSuccess
-		}
-
-		if feedInfo.LastError != nil {
-			fields["last_error"] = *feedInfo.LastError
-		}
-
-		log.WithFields(fields).Debug("Feed status")
-	}
+	return items
 }
+
+// moveToDeadLetterLocked moves an item from retry queue to dead letter.
+// NOTE: Must be called with t.mutex locked.
+func (t *Tracker) moveToDeadLetterLocked(compositeKey string, item RetryItem) {
+	t.retryStatus.DeadLetterItems = append(t.retryStatus.DeadLetterItems, DeadLetterItem{
+		ItemKey:     item.ItemKey,
+		ItemType:    item.ItemType,
+		Messenger:   item.Messenger,
+		Title:       item.Title,
+		RetryCount:  item.RetryCount,
+		LastError:   item.LastError,
+		FirstFailed: item.FirstFailed,
+		DeadAt:      time.Now().Format("2006-01-02 15:04:05"),
+	})
+	delete(t.retryStatus.RetryQueue, compositeKey)
+	t.retryStatus.LastUpdated = time.Now()
+	t.retryDirty = true
+
+	log.WithFields(log.Fields{
+		"item_key":    item.ItemKey,
+		"title":       item.Title,
+		"item_type":   item.ItemType,
+		"messenger":   item.Messenger,
+		"retry_count": item.RetryCount,
+		"last_error":  item.LastError,
+	}).Warn("Item moved to dead letter after exhausting retries")
+}
+
+// --- Retry Persistence ---
+
+// loadRetryStatus loads retry status from JSON file if it exists.
+func (t *Tracker) loadRetryStatus() error {
+	filePath := filepath.Join(t.dataDir, "retry_status.json")
+
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		log.WithField("file", filePath).Info("Retry status file does not exist, starting with empty queue")
+		return nil
+	}
+
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to read retry status file: %w", err)
+	}
+
+	var loadedStatus RetryStatus
+	if err := json.Unmarshal(data, &loadedStatus); err != nil {
+		return fmt.Errorf("failed to unmarshal retry status: %w", err)
+	}
+
+	if loadedStatus.RetryQueue == nil {
+		loadedStatus.RetryQueue = make(map[string]RetryItem)
+	}
+	if loadedStatus.DeadLetterItems == nil {
+		loadedStatus.DeadLetterItems = make([]DeadLetterItem, 0)
+	}
+
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
+	t.retryStatus = &loadedStatus
+
+	log.WithFields(log.Fields{
+		"file":              filePath,
+		"retry_queue_size":  len(t.retryStatus.RetryQueue),
+		"dead_letter_count": len(t.retryStatus.DeadLetterItems),
+	}).Info("Retry status loaded from file")
+
+	return nil
+}
+
+// saveRetryStatus saves retry status to JSON file.
+func (t *Tracker) saveRetryStatus() error {
+	filePath := filepath.Join(t.dataDir, "retry_status.json")
+
+	data, err := json.MarshalIndent(t.retryStatus, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal retry status: %w", err)
+	}
+
+	tempFile := filePath + ".tmp"
+	if err := os.WriteFile(tempFile, data, 0600); err != nil {
+		return fmt.Errorf("failed to write temporary retry status file: %w", err)
+	}
+
+	var renameErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		renameErr = os.Rename(tempFile, filePath)
+		if renameErr == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if renameErr != nil {
+		if cleanupErr := os.Remove(tempFile); cleanupErr != nil {
+			log.WithError(cleanupErr).Error("Failed to cleanup temporary retry status file")
+		}
+		return fmt.Errorf("failed to rename retry status file after 3 attempts: %w", renameErr)
+	}
+
+	return nil
+}
+
