@@ -1,7 +1,6 @@
 package discord
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -10,26 +9,10 @@ import (
 	"Ransomware-Bot/internal/config"
 	"Ransomware-Bot/internal/country"
 	"Ransomware-Bot/internal/rss"
+	"Ransomware-Bot/internal/textutil"
 
 	"github.com/bwmarrin/discordgo"
 )
-
-// defangURL converts URLs to a safe format by replacing http/https with hxxp/hxxps
-func defangURL(url string) string {
-	if url == "" {
-		return url
-	}
-
-	// Replace http:// and https:// with defanged versions
-	if strings.HasPrefix(url, "https://") {
-		return "hxxps://" + url[8:]
-	}
-	if strings.HasPrefix(url, "http://") {
-		return "hxxp://" + url[7:]
-	}
-
-	return url
-}
 
 // formatTimestamp formats a timestamp string consistently
 // Handles multiple input formats and normalizes to "2006-01-02 15:04:05"
@@ -88,7 +71,7 @@ func (w *WebhookSender) formatRansomwareEmbed(entry api.RansomwareEntry, formatC
 			embed.Fields = append(embed.Fields, spacer)
 		}
 		// Create the field for the current entry
-		field := w.createRansomwareField(fieldName, entry, formatConfig.ShowUnicodeFlags)
+		field := w.createRansomwareField(fieldName, entry, formatConfig)
 		if field != nil {
 			embed.Fields = append(embed.Fields, field)
 		}
@@ -97,12 +80,20 @@ func (w *WebhookSender) formatRansomwareEmbed(entry api.RansomwareEntry, formatC
 	return embed
 }
 
-// createRansomwareField creates a Discord embed field for a specific ransomware entry field
-func (w *WebhookSender) createRansomwareField(fieldName string, entry api.RansomwareEntry, showFlags bool) *discordgo.MessageEmbedField {
+// createRansomwareField creates a Discord embed field for a specific ransomware entry field.
+// When ShowEmptyFields is enabled, missing values are rendered with EmptyFieldText as placeholder.
+func (w *WebhookSender) createRansomwareField(fieldName string, entry api.RansomwareEntry, formatConfig *config.FormatConfig) *discordgo.MessageEmbedField {
+	showFlags := formatConfig.ShowUnicodeFlags
+	placeholder := formatConfig.EmptyFieldText
+	showEmpty := formatConfig.ShowEmptyFields
+
 	switch strings.ToLower(fieldName) {
 	case "country":
+		value := placeholder
 		if entry.Country != "" {
-			value := country.FormatCountryDisplay(entry.Country, showFlags)
+			value = country.FormatCountryDisplay(entry.Country, showFlags)
+		}
+		if value != placeholder || showEmpty {
 			return &discordgo.MessageEmbedField{
 				Name:   "🌍 Country",
 				Value:  value,
@@ -111,45 +102,59 @@ func (w *WebhookSender) createRansomwareField(fieldName string, entry api.Ransom
 		}
 
 	case "victim":
+		value := placeholder
 		if entry.Victim != "" {
+			value = entry.Victim
+		}
+		if value != placeholder || showEmpty {
 			return &discordgo.MessageEmbedField{
 				Name:   "🎯 Victim",
-				Value:  entry.Victim,
+				Value:  value,
 				Inline: true,
 			}
 		}
 
 	case "group":
+		value := placeholder
 		if entry.Group != "" {
+			value = entry.Group
+		}
+		if value != placeholder || showEmpty {
 			return &discordgo.MessageEmbedField{
 				Name:   "💀 Group",
-				Value:  entry.Group,
+				Value:  value,
 				Inline: true,
 			}
 		}
 
 	case "activity":
+		value := placeholder
 		if entry.Activity != "" {
+			value = entry.Activity
+		}
+		if value != placeholder || showEmpty {
 			return &discordgo.MessageEmbedField{
 				Name:   "📊 Activity",
-				Value:  entry.Activity,
+				Value:  value,
 				Inline: true,
 			}
 		}
 
 	case "attackdate":
+		value := placeholder
 		if entry.AttackDate != "" {
-			// Use consistent timestamp formatting
-			formattedDate := formatTimestamp(entry.AttackDate)
+			value = formatTimestamp(entry.AttackDate)
+		}
+		if value != placeholder || showEmpty {
 			return &discordgo.MessageEmbedField{
 				Name:   "⚔️ Attack Date",
-				Value:  formattedDate,
+				Value:  value,
 				Inline: true,
 			}
 		}
 
 	case "discovered":
-		// Use consistent timestamp formatting for time.Time
+		// Discovered always has a value (timestamp)
 		formattedDate := entry.Discovered.Format("2006-01-02 15:04:05")
 		return &discordgo.MessageEmbedField{
 			Name:   "🔍 Discovered",
@@ -157,43 +162,54 @@ func (w *WebhookSender) createRansomwareField(fieldName string, entry api.Ransom
 			Inline: true,
 		}
 
-	case "post_url":
+	case "post_url", "claim_url":
+		value := placeholder
 		if entry.ClaimURL != "" {
+			value = textutil.DefangURL(entry.ClaimURL)
+		}
+		if value != placeholder || showEmpty {
 			return &discordgo.MessageEmbedField{
 				Name:   "🔗 Ransom URL",
-				Value:  defangURL(entry.ClaimURL),
+				Value:  value,
 				Inline: false,
 			}
 		}
 
-	case "website":
+	case "website", "url":
+		value := placeholder
 		if entry.URL != "" {
+			value = entry.URL
+		}
+		if value != placeholder || showEmpty {
 			return &discordgo.MessageEmbedField{
 				Name:   "🌐 Website",
-				Value:  entry.URL,
+				Value:  value,
 				Inline: false,
 			}
 		}
 
 	case "description":
+		value := placeholder
 		if entry.Description != "" {
-			// Truncate to 500 characters to avoid MAX_EMBED_SIZE_EXCEEDED
-			desc := entry.Description
-			if len(desc) > 500 {
-				desc = desc[:497] + "..."
-			}
+			value = textutil.TruncateText(entry.Description, 500)
+		}
+		if value != placeholder || showEmpty {
 			return &discordgo.MessageEmbedField{
 				Name:   "📝 Description",
-				Value:  desc,
+				Value:  value,
 				Inline: false,
 			}
 		}
 
 	case "screenshot":
+		value := placeholder
 		if entry.Screenshot != "" {
+			value = entry.Screenshot
+		}
+		if value != placeholder || showEmpty {
 			return &discordgo.MessageEmbedField{
 				Name:   "📸 Screenshot",
-				Value:  entry.Screenshot,
+				Value:  value,
 				Inline: false,
 			}
 		}
@@ -275,31 +291,3 @@ func (w *WebhookSender) truncateDescription(description string, maxLength int) s
 	return truncated + "..."
 }
 
-// CreateStatusEmbed creates a status/info embed
-func (w *WebhookSender) CreateStatusEmbed(title, message string, color int) *discordgo.MessageEmbed {
-	return &discordgo.MessageEmbed{
-		Title:       title,
-		Description: message,
-		Color:       color,
-		Timestamp:   time.Now().Format(time.RFC3339),
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Discord Threat Intel Bot",
-		},
-	}
-}
-
-// SendStatusMessage sends a status message to a webhook
-func (w *WebhookSender) SendStatusMessage(ctx context.Context, webhookURL, title, message string) error {
-	embed := w.CreateStatusEmbed(title, message, 0x00ff00) // Green color for status
-
-	params := &discordgo.WebhookParams{
-		Embeds: []*discordgo.MessageEmbed{embed},
-	}
-
-	webhookID, webhookToken, err := parseWebhookURL(webhookURL)
-	if err != nil {
-		return fmt.Errorf("invalid webhook URL: %w", err)
-	}
-
-	return w.executeWebhook(ctx, webhookID, webhookToken, params)
-}

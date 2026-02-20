@@ -1,5 +1,7 @@
 {
   "show_unicode_flags": true,
+  "show_empty_fields": true,
+  "empty_field_text": "N/A",
   "field_order": [
     "victim",
     "activity",

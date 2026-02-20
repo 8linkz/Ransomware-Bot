@@ -6,7 +6,9 @@ import (
 
 	"Ransomware-Bot/internal/api"
 	"Ransomware-Bot/internal/config"
+	"Ransomware-Bot/internal/country"
 	"Ransomware-Bot/internal/rss"
+	"Ransomware-Bot/internal/textutil"
 )
 
 // SlackMessage represents a Slack message with Block Kit formatting
@@ -68,38 +70,70 @@ func formatRansomwareMessage(entry api.RansomwareEntry, formatConfig *config.For
 		fieldOrder = []string{"group", "victim", "country", "activity", "attackdate", "discovered", "screenshot", "post_url", "website", "description"}
 	}
 
+	// Determine placeholder settings
+	showEmpty := formatConfig != nil && formatConfig.ShowEmptyFields
+	placeholder := "N/A"
+	if formatConfig != nil && formatConfig.EmptyFieldText != "" {
+		placeholder = formatConfig.EmptyFieldText
+	}
+
 	// Build fields based on format config order
 	for _, fieldName := range fieldOrder {
 		var fieldText string
+		hasValue := false
 
 		switch fieldName {
 		case "group":
 			if entry.Group != "" {
 				fieldText = fmt.Sprintf("*Group:*\n%s", entry.Group)
+				hasValue = true
 			}
 		case "victim":
 			if entry.Victim != "" {
 				fieldText = fmt.Sprintf("*Victim:*\n%s", entry.Victim)
+				hasValue = true
 			}
 		case "country":
 			if entry.Country != "" {
 				countryText := entry.Country
 				if formatConfig != nil && formatConfig.ShowUnicodeFlags {
-					countryText = getCountryFlag(entry.Country) + " " + entry.Country
+					countryText = country.GetCountryFlag(entry.Country) + " " + entry.Country
 				}
 				fieldText = fmt.Sprintf("*Country:*\n%s", countryText)
+				hasValue = true
 			}
 		case "activity":
 			if entry.Activity != "" {
 				fieldText = fmt.Sprintf("*Activity:*\n%s", entry.Activity)
+				hasValue = true
 			}
 		case "attackdate":
 			if entry.AttackDate != "" {
 				fieldText = fmt.Sprintf("*Attack Date:*\n%s", entry.AttackDate)
+				hasValue = true
 			}
 		case "discovered":
 			if !entry.Discovered.Time.IsZero() {
 				fieldText = fmt.Sprintf("*Discovered:*\n%s", entry.Discovered.Time.Format("2006-01-02 15:04:05"))
+				hasValue = true
+			}
+		}
+
+		// Render placeholder for empty fields when ShowEmptyFields is enabled
+		if !hasValue && showEmpty {
+			switch fieldName {
+			case "group":
+				fieldText = fmt.Sprintf("*Group:*\n%s", placeholder)
+			case "victim":
+				fieldText = fmt.Sprintf("*Victim:*\n%s", placeholder)
+			case "country":
+				fieldText = fmt.Sprintf("*Country:*\n%s", placeholder)
+			case "activity":
+				fieldText = fmt.Sprintf("*Activity:*\n%s", placeholder)
+			case "attackdate":
+				fieldText = fmt.Sprintf("*Attack Date:*\n%s", placeholder)
+			case "discovered":
+				fieldText = fmt.Sprintf("*Discovered:*\n%s", placeholder)
 			}
 		}
 
@@ -139,42 +173,53 @@ func formatRansomwareMessage(entry api.RansomwareEntry, formatConfig *config.For
 
 		switch fieldName {
 		case "screenshot":
+			value := placeholder
 			if entry.Screenshot != "" {
+				value = entry.Screenshot
+			}
+			if entry.Screenshot != "" || showEmpty {
 				urlBlock = &Block{
 					Type: "section",
 					Fields: []TextObject{
 						{
 							Type: "mrkdwn",
-							Text: fmt.Sprintf("*Screenshot:*\n%s", entry.Screenshot),
+							Text: fmt.Sprintf("*Screenshot:*\n%s", value),
 						},
 					},
 				}
 			}
-		case "post_url":
+		case "post_url", "claim_url":
+			value := placeholder
 			if entry.ClaimURL != "" {
+				value = textutil.DefangURL(entry.ClaimURL)
+			}
+			if entry.ClaimURL != "" || showEmpty {
 				// Add divider before Ransom URL if screenshot was added
 				if urlsSectionAdded {
 					blocks = append(blocks, Block{Type: "divider"})
 				}
-				defanged := defangURL(entry.ClaimURL)
 				urlBlock = &Block{
 					Type: "section",
 					Fields: []TextObject{
 						{
 							Type: "mrkdwn",
-							Text: fmt.Sprintf("*Ransom URL:*\n%s", defanged),
+							Text: fmt.Sprintf("*Ransom URL:*\n%s", value),
 						},
 					},
 				}
 			}
 		case "url", "website":
+			value := placeholder
 			if entry.URL != "" {
+				value = entry.URL
+			}
+			if entry.URL != "" || showEmpty {
 				urlBlock = &Block{
 					Type: "section",
 					Fields: []TextObject{
 						{
 							Type: "mrkdwn",
-							Text: fmt.Sprintf("*Website:*\n%s", entry.URL),
+							Text: fmt.Sprintf("*Website:*\n%s", value),
 						},
 					},
 				}
@@ -187,16 +232,22 @@ func formatRansomwareMessage(entry api.RansomwareEntry, formatConfig *config.For
 		}
 	}
 
-	// Add description if present
+	// Add description
 	for _, fieldName := range fieldOrder {
-		if fieldName == "description" && entry.Description != "" {
-			blocks = append(blocks, Block{
-				Type: "section",
-				Text: &TextObject{
-					Type: "mrkdwn",
-					Text: fmt.Sprintf("*Description:*\n%s", truncateText(entry.Description, 500)),
-				},
-			})
+		if fieldName == "description" {
+			value := placeholder
+			if entry.Description != "" {
+				value = textutil.TruncateText(entry.Description, 500)
+			}
+			if entry.Description != "" || showEmpty {
+				blocks = append(blocks, Block{
+					Type: "section",
+					Text: &TextObject{
+						Type: "mrkdwn",
+						Text: fmt.Sprintf("*Description:*\n%s", value),
+					},
+				})
+			}
 			break
 		}
 	}
@@ -260,12 +311,12 @@ func formatRSSMessage(entry rss.Entry, formatConfig *config.FormatConfig) SlackM
 
 	// Description if present
 	if entry.Description != "" {
-		cleanDescription := stripHTML(entry.Description)
+		cleanDescription := textutil.StripHTML(entry.Description)
 		blocks = append(blocks, Block{
 			Type: "section",
 			Text: &TextObject{
 				Type: "mrkdwn",
-				Text: truncateText(cleanDescription, 500),
+				Text: textutil.TruncateText(cleanDescription, 500),
 			},
 		})
 	}
@@ -342,58 +393,3 @@ func formatRSSMessage(entry rss.Entry, formatConfig *config.FormatConfig) SlackM
 	}
 }
 
-// getCountryFlag returns the flag emoji for a country code
-func getCountryFlag(countryCode string) string {
-	if len(countryCode) != 2 {
-		return ""
-	}
-
-	// Convert country code to flag emoji
-	// Each letter becomes its regional indicator symbol
-	countryCode = strings.ToUpper(countryCode)
-	flag := ""
-	for _, ch := range countryCode {
-		if ch >= 'A' && ch <= 'Z' {
-			flag += string(rune(0x1F1E6 + (ch - 'A')))
-		}
-	}
-	return flag
-}
-
-// stripHTML removes HTML tags from text (simple implementation)
-func stripHTML(text string) string {
-	// Remove HTML tags using strings.Builder for efficiency
-	var result strings.Builder
-	result.Grow(len(text)) // Pre-allocate capacity
-	inTag := false
-	for _, ch := range text {
-		if ch == '<' {
-			inTag = true
-			continue
-		}
-		if ch == '>' {
-			inTag = false
-			continue
-		}
-		if !inTag {
-			result.WriteRune(ch)
-		}
-	}
-	return strings.TrimSpace(result.String())
-}
-
-// truncateText truncates text to a maximum length
-func truncateText(text string, maxLength int) string {
-	if len(text) <= maxLength {
-		return text
-	}
-	return text[:maxLength-3] + "..."
-}
-
-// defangURL defangs URLs to prevent accidental clicks (only http/https replacement)
-// http://example.com -> hxxp://example.com
-func defangURL(url string) string {
-	defanged := strings.ReplaceAll(url, "https://", "hxxps://")
-	defanged = strings.ReplaceAll(defanged, "http://", "hxxp://")
-	return defanged
-}

@@ -2,21 +2,15 @@ package rss
 
 import (
 	"Ransomware-Bot/internal/status"
+	"Ransomware-Bot/internal/textutil"
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/mmcdole/gofeed"
 	log "github.com/sirupsen/logrus"
-)
-
-// Pre-compiled regex patterns for HTML stripping (performance optimization)
-var (
-	htmlTagRegex    = regexp.MustCompile(`<[^>]*>`)
-	whitespaceRegex = regexp.MustCompile(`\s+`)
 )
 
 // Parser handles RSS feed parsing with retry logic and deduplication
@@ -97,7 +91,7 @@ func (p *Parser) ParseFeed(ctx context.Context, feedURL string) ([]Entry, error)
 			"max_attempts": p.retryCount + 1,
 		}).Debug("Attempting to parse RSS feed")
 
-		feed, err = p.parser.ParseURL(feedURL)
+		feed, err = p.parser.ParseURLWithContext(feedURL, ctx)
 		if err == nil {
 			break
 		}
@@ -147,7 +141,7 @@ func (p *Parser) processFeedItems(feed *gofeed.Feed, feedURL string) []Entry {
 		}
 
 		// Generate unique key for this item
-		key := p.generateItemKey(feedURL, item)
+		key := GenerateEntryKey(feedURL, safeString(item.GUID), safeString(item.Link), safeString(item.Title))
 
 		// Skip if we've already processed this item (using persistent storage)
 		if p.statusTracker != nil && p.statusTracker.IsItemProcessed(feedURL, key) {
@@ -158,7 +152,7 @@ func (p *Parser) processFeedItems(feed *gofeed.Feed, feedURL string) []Entry {
 		entry := Entry{
 			Title:       safeString(item.Title),
 			Link:        safeString(item.Link),
-			Description: stripHTML(safeString(item.Description)),
+			Description: textutil.StripHTML(safeString(item.Description)),
 			Author:      getAuthorName(item),
 			Categories:  safeCategories(item.Categories),
 			GUID:        safeString(item.GUID),
@@ -181,26 +175,35 @@ func (p *Parser) processFeedItems(feed *gofeed.Feed, feedURL string) []Entry {
 	return newEntries
 }
 
-// generateItemKey creates a unique key for an RSS item
-func (p *Parser) generateItemKey(feedURL string, item *gofeed.Item) string {
-	if item == nil {
-		return feedURL + ":nil-item"
+// GenerateContentSignature creates a content-based signature for an RSS item.
+// This is used as a secondary dedup check to catch link variants
+// (e.g. ".../article" vs ".../article-0") that have the same content.
+func GenerateContentSignature(feedURL, title string, published time.Time) string {
+	normalizedTitle := strings.ToLower(strings.TrimSpace(title))
+	dateStr := ""
+	if !published.IsZero() {
+		dateStr = published.Format("2006-01-02")
 	}
+	return "content-sig:" + feedURL + ":" + normalizedTitle + ":" + dateStr
+}
 
+// GenerateEntryKey creates a unique key for an RSS item.
+// This is the single source of truth for RSS item key generation,
+// used by both the parser and the scheduler to ensure consistent deduplication.
+func GenerateEntryKey(feedURL, guid, link, title string) string {
 	// Prefer GUID if available (most stable)
-	if item.GUID != "" {
-		return feedURL + ":" + item.GUID
+	if guid != "" {
+		return feedURL + ":" + guid
 	}
 
 	// Fallback to link if available (very stable)
-	if item.Link != "" {
-		return feedURL + ":" + item.Link
+	if link != "" {
+		return feedURL + ":" + link
 	}
 
-	// Last resort: use title only (without date to avoid duplicates)
-	// Normalize title by trimming and converting to lowercase
-	if item.Title != "" {
-		normalizedTitle := strings.ToLower(strings.TrimSpace(item.Title))
+	// Last resort: use normalized title (lowercase, trimmed)
+	if title != "" {
+		normalizedTitle := strings.ToLower(strings.TrimSpace(title))
 		return feedURL + ":" + normalizedTitle
 	}
 
@@ -324,8 +327,14 @@ func (wp *workerPool) worker(ctx context.Context) {
 	}
 }
 
+// FeedResults holds the results and per-feed errors from parsing multiple feeds.
+type FeedResults struct {
+	Entries    map[string][]Entry  // feedURL → parsed entries
+	FeedErrors map[string]string   // feedURL → error message (only for failed feeds)
+}
+
 // processFeeds starts workers and processes all feeds with controlled concurrency
-func (wp *workerPool) processFeeds(ctx context.Context, feedURLs []string) (map[string][]Entry, error) {
+func (wp *workerPool) processFeeds(ctx context.Context, feedURLs []string) (*FeedResults, error) {
 	// Create a child context that we can cancel to stop all workers
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel() // Always cancel workers when returning
@@ -355,8 +364,10 @@ func (wp *workerPool) processFeeds(ctx context.Context, feedURLs []string) (map[
 	}()
 
 	// Collect results
-	results := make(map[string][]Entry)
-	var errors []error
+	fr := &FeedResults{
+		Entries:    make(map[string][]Entry),
+		FeedErrors: make(map[string]string),
+	}
 
 	for i := 0; i < len(feedURLs); i++ {
 		select {
@@ -364,14 +375,13 @@ func (wp *workerPool) processFeeds(ctx context.Context, feedURLs []string) (map[
 			if !ok {
 				// Channel closed - all workers finished
 				log.WithField("collected", i).Warn("Results channel closed before collecting all results")
-				return results, fmt.Errorf("collected %d of %d feeds before workers finished", i, len(feedURLs))
+				return fr, fmt.Errorf("collected %d of %d feeds before workers finished", i, len(feedURLs))
 			}
 			if result.err != nil {
-				errors = append(errors, fmt.Errorf("failed to parse %s: %w", result.url, result.err))
-				// Include failed feeds with empty results for status tracking
-				results[result.url] = []Entry{}
+				fr.FeedErrors[result.url] = result.err.Error()
+				fr.Entries[result.url] = []Entry{}
 			} else {
-				results[result.url] = result.entries
+				fr.Entries[result.url] = result.entries
 			}
 		case <-ctx.Done():
 			// Parent context cancelled - cancel workers and return
@@ -399,28 +409,33 @@ func (wp *workerPool) processFeeds(ctx context.Context, feedURLs []string) (map[
 			}
 
 			// Return partial results instead of failing completely
-			return results, fmt.Errorf("worker pool timeout after processing %d of %d feeds", i, len(feedURLs))
+			return fr, fmt.Errorf("worker pool timeout after processing %d of %d feeds", i, len(feedURLs))
 		}
 	}
 
-	// Log any errors but don't fail completely
-	if len(errors) > 0 {
-		// Aggregate errors efficiently using strings.Builder
+	// Log any per-feed errors
+	if len(fr.FeedErrors) > 0 {
 		var errorMsg strings.Builder
-		errorMsg.WriteString(fmt.Sprintf("Some RSS feeds failed to parse (%d errors):\n", len(errors)))
-		for i, err := range errors {
-			errorMsg.WriteString(fmt.Sprintf("  %d. %v\n", i+1, err))
+		errorMsg.WriteString(fmt.Sprintf("Some RSS feeds failed to parse (%d errors):\n", len(fr.FeedErrors)))
+		i := 1
+		for url, errMsg := range fr.FeedErrors {
+			errorMsg.WriteString(fmt.Sprintf("  %d. %s: %s\n", i, url, errMsg))
+			i++
 		}
 		log.Warn(errorMsg.String())
 	}
 
-	return results, nil
+	return fr, nil
 }
 
-// ParseMultipleFeeds parses multiple RSS feeds concurrently with worker pool limiting
-func (p *Parser) ParseMultipleFeeds(ctx context.Context, feedURLs []string, maxWorkers int) (map[string][]Entry, error) {
+// ParseMultipleFeeds parses multiple RSS feeds concurrently with worker pool limiting.
+// Returns FeedResults containing both per-feed entries and per-feed errors.
+func (p *Parser) ParseMultipleFeeds(ctx context.Context, feedURLs []string, maxWorkers int) (*FeedResults, error) {
 	if len(feedURLs) == 0 {
-		return make(map[string][]Entry), nil
+		return &FeedResults{
+			Entries:    make(map[string][]Entry),
+			FeedErrors: make(map[string]string),
+		}, nil
 	}
 
 	// Limit workers to available feeds if fewer feeds than workers
@@ -433,35 +448,4 @@ func (p *Parser) ParseMultipleFeeds(ctx context.Context, feedURLs []string, maxW
 	return pool.processFeeds(ctx, feedURLs)
 }
 
-// ClearCache clears the processed items cache (now delegates to status tracker)
-func (p *Parser) ClearCache() {
-	log.Info("Clear cache requested - processed items are now managed by status tracker")
-}
 
-// GetCacheSize returns the current size of the processed items cache
-func (p *Parser) GetCacheSize() int {
-	log.Info("Cache size requested - processed items are now managed by status tracker")
-	return 0 // Not applicable anymore
-}
-
-// stripHTML removes HTML tags and decodes HTML entities from text
-func stripHTML(input string) string {
-	if input == "" {
-		return ""
-	}
-
-	// Remove HTML tags using pre-compiled regex
-	text := htmlTagRegex.ReplaceAllString(input, "")
-
-	// Decode common HTML entities
-	text = strings.ReplaceAll(text, "&lt;", "<")
-	text = strings.ReplaceAll(text, "&gt;", ">")
-	text = strings.ReplaceAll(text, "&amp;", "&")
-	text = strings.ReplaceAll(text, "&quot;", "\"")
-	text = strings.ReplaceAll(text, "&#39;", "'")
-	text = strings.ReplaceAll(text, "&nbsp;", " ")
-
-	// Clean up multiple spaces and trim using pre-compiled regex
-	text = whitespaceRegex.ReplaceAllString(text, " ")
-	return strings.TrimSpace(text)
-}

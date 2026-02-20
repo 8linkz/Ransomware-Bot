@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/sirupsen/logrus"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 // LogRotationConfig contains log rotation settings
@@ -18,10 +19,10 @@ type LogRotationConfig struct {
 	Compress   bool
 }
 
-// logFile holds the reference to the open log file for cleanup
+// ljLogger holds the reference to the lumberjack logger for cleanup
 var (
-	logFile     *os.File
-	logFileMu   sync.Mutex
+	ljLogger  *lumberjack.Logger
+	ljLoggerMu sync.Mutex
 )
 
 // NewLogger creates a new logger instance with file and console output
@@ -34,23 +35,25 @@ func NewLogger(logLevel string, logFilePath string, rotationConfig LogRotationCo
 	}
 	logrus.SetLevel(level)
 
-	// Open log file with append mode
-	logFileMu.Lock()
-	defer logFileMu.Unlock()
+	// Set up lumberjack for log rotation
+	ljLoggerMu.Lock()
+	defer ljLoggerMu.Unlock()
 
-	// Close previous log file if open
-	if logFile != nil {
-		logFile.Close()
+	// Close previous logger if open
+	if ljLogger != nil {
+		ljLogger.Close()
 	}
 
-	var fileErr error
-	logFile, fileErr = os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if fileErr != nil {
-		return fmt.Errorf("failed to open log file: %w", fileErr)
+	ljLogger = &lumberjack.Logger{
+		Filename:   logFilePath,
+		MaxSize:    rotationConfig.MaxSizeMB,
+		MaxBackups: rotationConfig.MaxBackups,
+		MaxAge:     rotationConfig.MaxAgeDays,
+		Compress:   rotationConfig.Compress,
 	}
 
-	// Set up multi-writer to write to both file and console
-	multiWriter := io.MultiWriter(os.Stdout, logFile)
+	// Set up multi-writer to write to both file (with rotation) and console
+	multiWriter := io.MultiWriter(os.Stdout, ljLogger)
 	logrus.SetOutput(multiWriter)
 
 	// Set custom formatter on global logger
@@ -68,19 +71,19 @@ func NewLogger(logLevel string, logFilePath string, rotationConfig LogRotationCo
 		"max_backups": rotationConfig.MaxBackups,
 		"max_age":     fmt.Sprintf("%d days", rotationConfig.MaxAgeDays),
 		"compress":    rotationConfig.Compress,
-	}).Info("Logger initialized with file output")
+	}).Info("Logger initialized with log rotation")
 
 	return nil
 }
 
 // Close closes the log file and should be called during application shutdown
 func Close() error {
-	logFileMu.Lock()
-	defer logFileMu.Unlock()
+	ljLoggerMu.Lock()
+	defer ljLoggerMu.Unlock()
 
-	if logFile != nil {
-		err := logFile.Close()
-		logFile = nil
+	if ljLogger != nil {
+		err := ljLogger.Close()
+		ljLogger = nil
 		return err
 	}
 	return nil
