@@ -43,11 +43,7 @@ func MatchesAPIEntry(filters *config.WebhookFilters, entry api.RansomwareEntry) 
 
 	// Check keyword filter against Victim + Description
 	searchText := entry.Victim + " " + entry.Description
-	if !matchesKeywords(filters.IncludeKeywords, filters.ExcludeKeywords, searchText, filters.KeywordMatchMode) {
-		return false
-	}
-
-	return true
+	return matchesKeywords(filters.IncludeKeywords, filters.ExcludeKeywords, searchText, filters.KeywordMatchMode)
 }
 
 // MatchesRSSEntry returns true if the RSS entry passes the webhook's filter rules.
@@ -64,11 +60,7 @@ func MatchesRSSEntry(filters *config.WebhookFilters, entry rss.Entry) bool {
 
 	// Check keyword filter against Title + Description
 	searchText := entry.Title + " " + entry.Description
-	if !matchesKeywords(filters.IncludeKeywords, filters.ExcludeKeywords, searchText, filters.KeywordMatchMode) {
-		return false
-	}
-
-	return true
+	return matchesKeywords(filters.IncludeKeywords, filters.ExcludeKeywords, searchText, filters.KeywordMatchMode)
 }
 
 // matchesField checks a single-value field against include/exclude lists.

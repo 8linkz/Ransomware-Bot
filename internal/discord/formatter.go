@@ -52,7 +52,7 @@ func (w *WebhookSender) formatRansomwareEmbed(entry api.RansomwareEntry, formatC
 	embed := &discordgo.MessageEmbed{
 		Title:     fmt.Sprintf("🚨 Ransomware Alert: %s", entry.Group),
 		Color:     ColorRansomware,
-		Timestamp: entry.Discovered.Time.Format(time.RFC3339),
+		Timestamp: entry.Discovered.Format(time.RFC3339),
 		Footer: &discordgo.MessageEmbedFooter{
 			Text: "Ransomware.live API",
 		},

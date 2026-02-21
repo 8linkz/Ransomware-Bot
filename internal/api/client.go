@@ -180,7 +180,7 @@ func (c *Client) makeRequest(ctx context.Context, url string, target interface{}
 		if isRetryableStatusCode(resp.StatusCode) {
 			// Read and discard body to allow connection reuse
 			_, _ = io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
+			_ = resp.Body.Close()
 
 			lastErr = fmt.Errorf("API returned status %d: %s", resp.StatusCode, resp.Status)
 			log.WithFields(log.Fields{
@@ -193,7 +193,7 @@ func (c *Client) makeRequest(ctx context.Context, url string, target interface{}
 		// Non-retryable error status
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024)) // Read first 1KB for error message
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return fmt.Errorf("API returned status %d: %s - %s", resp.StatusCode, resp.Status, string(body))
 		}
 
@@ -202,10 +202,10 @@ func (c *Client) makeRequest(ctx context.Context, url string, target interface{}
 		resp.Body = http.MaxBytesReader(nil, resp.Body, 10<<20) // 10MB limit
 
 		if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return fmt.Errorf("failed to decode response: %w", err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		return nil
 	}

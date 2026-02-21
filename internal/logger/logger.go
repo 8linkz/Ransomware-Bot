@@ -41,7 +41,7 @@ func NewLogger(logLevel string, logFilePath string, rotationConfig LogRotationCo
 
 	// Close previous logger if open
 	if ljLogger != nil {
-		ljLogger.Close()
+		_ = ljLogger.Close()
 	}
 
 	ljLogger = &lumberjack.Logger{
