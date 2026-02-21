@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -70,30 +71,32 @@ func loadGeneralConfig(cfg *Config, configDir string) error {
 		return fmt.Errorf("failed to parse config file %s: %w", configPath, err)
 	}
 
-	// Apply general configuration to main config
-	cfg.LogLevel = generalCfg.LogLevel
-	cfg.MaxRSSWorkers = generalCfg.MaxRSSWorkers
+	// Apply general configuration to main config (only override defaults when explicitly set)
+	if generalCfg.LogLevel != "" {
+		cfg.LogLevel = generalCfg.LogLevel
+	}
+	if generalCfg.MaxRSSWorkers != nil {
+		cfg.MaxRSSWorkers = *generalCfg.MaxRSSWorkers
+	}
 	cfg.APIKey = generalCfg.APIKey
-	cfg.APIStartTime = generalCfg.APIStartTime
-	cfg.RSSRetryCount = generalCfg.RSSRetryCount
+	if generalCfg.RSSRetryCount != nil {
+		cfg.RSSRetryCount = *generalCfg.RSSRetryCount
+	}
 	cfg.DiscordWebhooks = generalCfg.DiscordWebhooks
 	cfg.SlackWebhooks = generalCfg.SlackWebhooks
 
-	// Apply log rotation settings (use defaults if not specified)
-	// Prevents misconfiguration that could exhaust disk space
-	// or create too many backup files
-	if generalCfg.LogRotation.MaxSizeMB > 0 {
-		cfg.LogRotation.MaxSizeMB = generalCfg.LogRotation.MaxSizeMB
+	// Apply log rotation settings (only override when explicitly set in JSON)
+	if generalCfg.LogRotation.MaxSizeMB != nil {
+		cfg.LogRotation.MaxSizeMB = *generalCfg.LogRotation.MaxSizeMB
 	}
-	if generalCfg.LogRotation.MaxBackups > 0 {
-		cfg.LogRotation.MaxBackups = generalCfg.LogRotation.MaxBackups
+	if generalCfg.LogRotation.MaxBackups != nil {
+		cfg.LogRotation.MaxBackups = *generalCfg.LogRotation.MaxBackups
 	}
-	if generalCfg.LogRotation.MaxAgeDays > 0 {
-		cfg.LogRotation.MaxAgeDays = generalCfg.LogRotation.MaxAgeDays
+	if generalCfg.LogRotation.MaxAgeDays != nil {
+		cfg.LogRotation.MaxAgeDays = *generalCfg.LogRotation.MaxAgeDays
 	}
-	// Compress can be explicitly set to false, so check if it was provided
-	if generalCfg.LogRotation != (LogRotation{}) {
-		cfg.LogRotation.Compress = generalCfg.LogRotation.Compress
+	if generalCfg.LogRotation.Compress != nil {
+		cfg.LogRotation.Compress = *generalCfg.LogRotation.Compress
 	}
 
 	// Parse duration strings
@@ -149,6 +152,39 @@ func loadGeneralConfig(cfg *Config, configDir string) error {
 		}
 		cfg.RSSWorkerTimeout = duration
 	}
+
+	// Parse RSS max item age (optional, 0 = disabled)
+	if generalCfg.RSSMaxItemAge != "" {
+		duration, err := time.ParseDuration(generalCfg.RSSMaxItemAge)
+		if err != nil {
+			return fmt.Errorf("invalid rss_max_item_age format: %w", err)
+		}
+		cfg.RSSMaxItemAge = duration
+	}
+
+	// Apply retry settings (override default only if explicitly set)
+	if generalCfg.RetryMaxAttempts != nil {
+		cfg.RetryMaxAttempts = *generalCfg.RetryMaxAttempts
+	}
+	if generalCfg.RetryWindow != "" {
+		duration, err := time.ParseDuration(generalCfg.RetryWindow)
+		if err != nil {
+			return fmt.Errorf("invalid retry_window format: %w", err)
+		}
+		cfg.RetryWindow = duration
+	}
+
+	// Apply data directory (override default only if explicitly set)
+	if generalCfg.DataDir != "" {
+		cfg.DataDir = generalCfg.DataDir
+	}
+
+	// Resolve data directory to absolute path (prevents working-directory dependency)
+	absDataDir, err := filepath.Abs(cfg.DataDir)
+	if err != nil {
+		return fmt.Errorf("failed to resolve data_dir to absolute path: %w", err)
+	}
+	cfg.DataDir = absDataDir
 
 	return nil
 }
@@ -326,6 +362,92 @@ func validateConfig(cfg *Config) error {
 		return fmt.Errorf("rss_worker_timeout out of range: %v (must be 5s-5m)", cfg.RSSWorkerTimeout)
 	}
 
+	// Validate retry settings
+	if cfg.RetryMaxAttempts < 0 || cfg.RetryMaxAttempts > 100 {
+		return fmt.Errorf("retry_max_attempts out of range: %d (must be 0-100, 0=unlimited)", cfg.RetryMaxAttempts)
+	}
+	if cfg.RetryWindow < 0 {
+		return fmt.Errorf("retry_window cannot be negative: %v", cfg.RetryWindow)
+	}
+
+	// Validate webhook filters
+	if err := validateWebhookFilters("discord.ransomware", cfg.DiscordWebhooks.Ransomware.Filters); err != nil {
+		return err
+	}
+	if err := validateWebhookFilters("discord.rss", cfg.DiscordWebhooks.RSS.Filters); err != nil {
+		return err
+	}
+	if err := validateWebhookFilters("discord.government", cfg.DiscordWebhooks.Government.Filters); err != nil {
+		return err
+	}
+	if err := validateWebhookFilters("slack.ransomware", cfg.SlackWebhooks.Ransomware.Filters); err != nil {
+		return err
+	}
+	if err := validateWebhookFilters("slack.rss", cfg.SlackWebhooks.RSS.Filters); err != nil {
+		return err
+	}
+	if err := validateWebhookFilters("slack.government", cfg.SlackWebhooks.Government.Filters); err != nil {
+		return err
+	}
+
+	// Validate quiet hours
+	if err := validateQuietHours("discord.ransomware", cfg.DiscordWebhooks.Ransomware.QuietHours); err != nil {
+		return err
+	}
+	if err := validateQuietHours("discord.rss", cfg.DiscordWebhooks.RSS.QuietHours); err != nil {
+		return err
+	}
+	if err := validateQuietHours("discord.government", cfg.DiscordWebhooks.Government.QuietHours); err != nil {
+		return err
+	}
+	if err := validateQuietHours("slack.ransomware", cfg.SlackWebhooks.Ransomware.QuietHours); err != nil {
+		return err
+	}
+	if err := validateQuietHours("slack.rss", cfg.SlackWebhooks.RSS.QuietHours); err != nil {
+		return err
+	}
+	if err := validateQuietHours("slack.government", cfg.SlackWebhooks.Government.QuietHours); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateWebhookFilters validates a single webhook's filter configuration
+func validateWebhookFilters(name string, filters *WebhookFilters) error {
+	if filters == nil {
+		return nil
+	}
+
+	// Validate keyword_match mode
+	switch strings.ToLower(filters.KeywordMatchMode) {
+	case "", "literal", "regex":
+		// valid
+	default:
+		return fmt.Errorf("webhook %s: invalid keyword_match mode %q (must be \"literal\" or \"regex\")", name, filters.KeywordMatchMode)
+	}
+
+	// Validate country codes (must be 2 letters)
+	for _, code := range append(filters.IncludeCountries, filters.ExcludeCountries...) {
+		if len(code) != 2 {
+			return fmt.Errorf("webhook %s: invalid country code %q (must be 2-letter ISO code)", name, code)
+		}
+	}
+
+	// If keyword_match is "regex", validate that all keyword patterns compile
+	if strings.EqualFold(filters.KeywordMatchMode, "regex") {
+		for _, pattern := range filters.IncludeKeywords {
+			if _, err := regexp.Compile(pattern); err != nil {
+				return fmt.Errorf("webhook %s: invalid include_keywords regex %q: %w", name, pattern, err)
+			}
+		}
+		for _, pattern := range filters.ExcludeKeywords {
+			if _, err := regexp.Compile(pattern); err != nil {
+				return fmt.Errorf("webhook %s: invalid exclude_keywords regex %q: %w", name, pattern, err)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -412,4 +534,69 @@ func validateFeedURL(url, name string) error {
 	}
 
 	return nil
+}
+
+// validateQuietHours validates a quiet hours configuration block.
+func validateQuietHours(name string, qh *QuietHours) error {
+	if qh == nil {
+		return nil
+	}
+
+	// Only validate time fields when enabled (allows pre-configuring without errors)
+	if !qh.Enabled {
+		return nil
+	}
+
+	startMin, err := validateTimeString(qh.Start)
+	if err != nil {
+		return fmt.Errorf("webhook %s quiet_hours.start: %w", name, err)
+	}
+	endMin, err := validateTimeString(qh.End)
+	if err != nil {
+		return fmt.Errorf("webhook %s quiet_hours.end: %w", name, err)
+	}
+	if startMin == endMin {
+		return fmt.Errorf("webhook %s quiet_hours: start and end must differ (both resolve to %02d:%02d)", name, startMin/60, startMin%60)
+	}
+
+	tz := qh.Timezone
+	if tz == "" {
+		tz = "UTC"
+	}
+	if _, err := time.LoadLocation(tz); err != nil {
+		return fmt.Errorf("webhook %s quiet_hours.timezone: invalid IANA timezone %q: %w", name, qh.Timezone, err)
+	}
+
+	return nil
+}
+
+// validateTimeString validates a time string in 24h ("HH:MM") or 12h ("10pm", "10:30 PM") format.
+// Returns the resolved minutes-of-day on success.
+func validateTimeString(s string) (int, error) {
+	m := parseTimeString(s)
+	if m < 0 {
+		return 0, fmt.Errorf("invalid time %q (use 24h \"HH:MM\" e.g. \"22:00\" or 12h e.g. \"10pm\", \"10:30 PM\")", s)
+	}
+	return m, nil
+}
+
+// ConfigFileTimes returns the latest modification time across all config files.
+// Used by the config watcher to detect changes.
+func ConfigFileTimes(configDir string) (time.Time, error) {
+	files := []string{"config_general.json", "config_feeds.json", "config_format.json"}
+	var latest time.Time
+	for _, f := range files {
+		path := filepath.Join(configDir, f)
+		info, err := os.Stat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue // optional files
+			}
+			return latest, err
+		}
+		if info.ModTime().After(latest) {
+			latest = info.ModTime()
+		}
+	}
+	return latest, nil
 }

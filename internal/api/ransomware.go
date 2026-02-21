@@ -85,7 +85,7 @@ type RansomwareResponse struct {
 //   - Prevents duplicate API calls for same data
 //   - Stores complete entry data for recovery
 //
-// Phase 2 (Send): IsAPIItemSent/MarkAPIItemSent
+// Phase 2 (Send): IsAPIItemSentToWebhook/MarkAPIItemSent
 //   - Tracks Discord delivery status
 //   - Enables retry of failed deliveries
 //
@@ -117,35 +117,6 @@ func (c *Client) GetLatestEntries(ctx context.Context) ([]RansomwareEntry, error
 
 	return response.Victims, nil
 }
-
-// GetRecentByGroup fetches recent entries for a specific ransomware group
-func (c *Client) GetRecentByGroup(ctx context.Context, groupName string) ([]RansomwareEntry, error) {
-	start := time.Now()
-	url := RansomwareLiveAPI + "/group/" + groupName
-
-	log.WithFields(log.Fields{
-		"url":   url,
-		"group": groupName,
-	}).Debug("Fetching entries for ransomware group")
-
-	var response RansomwareResponse
-	err := c.makeRequest(ctx, url, &response)
-
-	// Log the request
-	c.logRequest(url, time.Since(start), err)
-
-	if err != nil {
-		return nil, err
-	}
-
-	log.WithFields(log.Fields{
-		"group":         groupName,
-		"total_entries": len(response.Victims),
-	}).Info("Processed group-specific ransomware API response")
-
-	return response.Victims, nil
-}
-
 
 // GenerateEntryKey creates a unique key for an entry to use in deduplication
 //

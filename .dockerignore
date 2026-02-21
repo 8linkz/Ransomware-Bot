@@ -14,3 +14,17 @@ ransomware-bot
 *.exe
 Dockerfile
 docker-compose.yml
+
+# Test artifacts (keep out of prod build context)
+**/*_test.go
+**/testdata/
+*.test
+*.out
+
+# Claude/AI
+.claude/
+Todo.txt
+
+# Temp
+tmp/
+*.tmp

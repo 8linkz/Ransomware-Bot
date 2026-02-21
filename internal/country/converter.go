@@ -46,11 +46,6 @@ func ConvertCountry(isoCode string) CountryInfo {
 	}
 }
 
-// GetCountryName returns only the country name for a given ISO-2 code
-func GetCountryName(isoCode string) string {
-	return ConvertCountry(isoCode).Name
-}
-
 // GetCountryFlag returns only the flag emoji for a given ISO-2 code
 func GetCountryFlag(isoCode string) string {
 	return ConvertCountry(isoCode).Flag

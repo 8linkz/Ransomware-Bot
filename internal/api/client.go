@@ -53,16 +53,14 @@ func NewClient(apiKey string) (*Client, error) {
 
 		// Secure cipher suites for TLS 1.2 (TLS 1.3 manages its own)
 		CipherSuites: []uint16{
-			// GCM ciphers (preferred - AEAD)
+			// CHACHA20-POLY1305 (AEAD, performant without AES-NI)
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+			// AES-GCM (AEAD, hardware-accelerated)
 			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
 			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
 			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-			// CBC ciphers (available fallbacks)
-			tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
-			tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
-			tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
-			tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
 		},
 
 		// Security hardening
@@ -181,8 +179,8 @@ func (c *Client) makeRequest(ctx context.Context, url string, target interface{}
 		// Check if status code is retryable
 		if isRetryableStatusCode(resp.StatusCode) {
 			// Read and discard body to allow connection reuse
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
 
 			lastErr = fmt.Errorf("API returned status %d: %s", resp.StatusCode, resp.Status)
 			log.WithFields(log.Fields{
@@ -195,7 +193,7 @@ func (c *Client) makeRequest(ctx context.Context, url string, target interface{}
 		// Non-retryable error status
 		if resp.StatusCode != http.StatusOK {
 			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024)) // Read first 1KB for error message
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return fmt.Errorf("API returned status %d: %s - %s", resp.StatusCode, resp.Status, string(body))
 		}
 
@@ -204,10 +202,10 @@ func (c *Client) makeRequest(ctx context.Context, url string, target interface{}
 		resp.Body = http.MaxBytesReader(nil, resp.Body, 10<<20) // 10MB limit
 
 		if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			return fmt.Errorf("failed to decode response: %w", err)
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		return nil
 	}
