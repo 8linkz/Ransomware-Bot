@@ -113,8 +113,8 @@ func formatRansomwareMessage(entry api.RansomwareEntry, formatConfig *config.For
 				hasValue = true
 			}
 		case "discovered":
-			if !entry.Discovered.Time.IsZero() {
-				fieldText = fmt.Sprintf("*Discovered:*\n%s", entry.Discovered.Time.Format("2006-01-02 15:04:05"))
+			if !entry.Discovered.IsZero() {
+				fieldText = fmt.Sprintf("*Discovered:*\n%s", entry.Discovered.Format("2006-01-02 15:04:05"))
 				hasValue = true
 			}
 		}

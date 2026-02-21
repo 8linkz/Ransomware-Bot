@@ -416,10 +416,10 @@ func (wp *workerPool) processFeeds(ctx context.Context, feedURLs []string) (*Fee
 	// Log any per-feed errors
 	if len(fr.FeedErrors) > 0 {
 		var errorMsg strings.Builder
-		errorMsg.WriteString(fmt.Sprintf("Some RSS feeds failed to parse (%d errors):\n", len(fr.FeedErrors)))
+		fmt.Fprintf(&errorMsg, "Some RSS feeds failed to parse (%d errors):\n", len(fr.FeedErrors))
 		i := 1
 		for url, errMsg := range fr.FeedErrors {
-			errorMsg.WriteString(fmt.Sprintf("  %d. %s: %s\n", i, url, errMsg))
+			fmt.Fprintf(&errorMsg, "  %d. %s: %s\n", i, url, errMsg)
 			i++
 		}
 		log.Warn(errorMsg.String())
