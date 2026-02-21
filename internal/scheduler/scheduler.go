@@ -422,7 +422,7 @@ func (s *Scheduler) checkAPIOnce(ctx context.Context) {
 			if len(unsent) > 0 {
 				// Sort oldest-first to preserve chronological order (API returns newest-first)
 				sort.Slice(unsent, func(i, j int) bool {
-					return unsent[i].Discovered.Time.Before(unsent[j].Discovered.Time)
+					return unsent[i].Discovered.Before(unsent[j].Discovered.Time)
 				})
 				log.WithFields(log.Fields{
 					"total_entries":  len(allEntries),
@@ -476,7 +476,7 @@ func (s *Scheduler) checkAPIOnce(ctx context.Context) {
 			if len(unsent) > 0 {
 				// Sort oldest-first to preserve chronological order (API returns newest-first)
 				sort.Slice(unsent, func(i, j int) bool {
-					return unsent[i].Discovered.Time.Before(unsent[j].Discovered.Time)
+					return unsent[i].Discovered.Before(unsent[j].Discovered.Time)
 				})
 				log.WithFields(log.Fields{
 					"total_entries": len(allEntries),
