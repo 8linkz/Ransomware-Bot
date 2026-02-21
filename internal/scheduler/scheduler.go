@@ -948,6 +948,13 @@ func (s *Scheduler) sendRSSItemsToWebhook(ctx context.Context, items []status.St
 
 	cfg := s.getConfig()
 
+	// Sort oldest-first to preserve chronological order
+	sort.Slice(items, func(i, j int) bool {
+		ti, _ := time.Parse("2006-01-02 15:04:05.999999", items[i].Published)
+		tj, _ := time.Parse("2006-01-02 15:04:05.999999", items[j].Published)
+		return ti.Before(tj)
+	})
+
 	log.WithFields(log.Fields{
 		"total_items": len(items),
 		"feed_type":   feedType,
