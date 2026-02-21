@@ -12,9 +12,10 @@ data/
 logs/
 *.log
 *.json.tmp
+.claude/
+settings.local.json
 
 # Config files with secrets
-config_general.json
 .env
 .env.local
 *.secret
@@ -31,6 +32,10 @@ vendor/
 *.out
 go.work
 go.work.sum
+
+# Tests
+*_test.go
+**/testdata/
 
 # Build artifacts
 dist/

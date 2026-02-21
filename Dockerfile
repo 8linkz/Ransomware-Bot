@@ -1,5 +1,5 @@
 # Build Stage
-FROM golang:1.24-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git ca-certificates tzdata
@@ -22,15 +22,14 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     .
 
 # Runtime Stage
-FROM alpine:3.21
+FROM alpine:latest
 
 # Install runtime dependencies and security updates
 RUN apk update && \
     apk upgrade --no-cache && \
     apk add --no-cache \
         ca-certificates \
-        tzdata \
-        tini && \
+        tzdata && \
     rm -rf /var/cache/apk/*
 
 WORKDIR /app
@@ -55,18 +54,16 @@ VOLUME ["/app/configs", "/app/logs", "/app/data"]
 # Switch to non-root user
 USER botuser
 
-# Health check (optional - adjust based on your needs)
-# HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-#   CMD pgrep ransomware-bot || exit 1
+# Health check: verify the bot process is running
+# Note: With init: true in docker-compose.yml, PID 1 is the init process, not the bot
+HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
+  CMD pidof ransomware-bot || exit 1
 
 # Set environment variables
 ENV TZ=UTC \
     CONFIG_DIR=/app/configs \
     LOG_DIR=/app/logs \
     DATA_DIR=/app/data
-
-# Use tini as init system to handle signals properly
-ENTRYPOINT ["/sbin/tini", "--"]
 
 # Start the bot
 CMD ["/app/ransomware-bot", "--config-dir", "/app/configs"]

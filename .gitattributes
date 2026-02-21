@@ -1,0 +1,4 @@
+# Enforce LF in repo to avoid CRLF churn on Windows.
+*.go   text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf

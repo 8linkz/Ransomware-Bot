@@ -152,7 +152,7 @@ func (w *WebhookSender) executeWebhook(ctx context.Context, webhookURL string, p
 
 		// Read response body
 		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		lastStatusCode = resp.StatusCode
 
@@ -213,3 +213,4 @@ func isRetryableStatusCode(statusCode int) bool {
 		return false
 	}
 }
+

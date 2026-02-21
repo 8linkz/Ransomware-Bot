@@ -1,6 +1,7 @@
 services:
   ransomware-bot:
     build: .
+    image: ransomware-bot
     container_name: ransomware-bot
     restart: unless-stopped
     init: true
@@ -12,11 +13,8 @@ services:
     environment:
       - TZ=UTC
 
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 512M
+    mem_limit: 512m
+    cpus: 1.0
 
     logging:
       driver: "json-file"

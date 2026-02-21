@@ -9,6 +9,33 @@ This bot is 100% vibe-coded - I provide no guarantee for 100% security.
 
 ![grafik](https://github.com/user-attachments/assets/699b63de-043e-40cc-9fb8-e396cf55ce79)
 
+## 🚀 CLI Flags
+
+```bash
+# Normal operation
+./ransomware-bot --config-dir ./configs
+
+# Validate configuration without starting the bot
+./ransomware-bot --check-config --config-dir ./configs
+
+# Preview mode: run one cycle, log what WOULD be sent, then exit
+./ransomware-bot --dry-run --config-dir ./configs
+
+# Override data directory
+./ransomware-bot --data-dir /custom/data/path
+
+# Show version
+./ransomware-bot --version
+```
+
+| Flag | Description |
+| --- | --- |
+| `--config-dir` | Directory containing JSON config files (default: `./configs`) |
+| `--data-dir` | Directory for persistent data (overrides config and `DATA_DIR` env) |
+| `--check-config` | Validate configuration and exit (exit code 0 = OK, 1 = invalid) |
+| `--dry-run` | Run a single cycle, log all messages with `[DRY-RUN]` prefix, don't send or modify tracker |
+| `--version` | Show version information and exit |
+
 ## 🔧 Prerequisites
 
 ### API Key
@@ -54,15 +81,26 @@ To create Slack webhooks:
   "max_rss_workers": 5,
   "api_key": "YOUR_RANSOMWARE_LIVE_API_KEY",
   "api_poll_interval": "1h",
-  "api_start_time": "",
   "rss_poll_interval": "30m",
   "rss_retry_count": 3,
   "rss_retry_delay": "2s",
+  "rss_worker_timeout": "30s",
+  "rss_max_item_age": "",
+  "data_dir": "./data",
   "discord_delay": "2s",
+  "slack_delay": "2s",
+  "retry_max_attempts": 5,
+  "retry_window": "24h",
   "discord_webhooks": {
     "ransomware": {
       "enabled": true,
-      "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
+      "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN",
+      "quiet_hours": {
+        "enabled": false,
+        "start": "10pm",
+        "end": "7am",
+        "timezone": "Europe/Berlin"
+      }
     },
     "rss": {
       "enabled": true,
@@ -73,7 +111,6 @@ To create Slack webhooks:
       "url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN"
     }
   },
-  "slack_delay": "2s",
   "slack_webhooks": {
     "ransomware": {
       "enabled": true,
@@ -104,6 +141,10 @@ To create Slack webhooks:
 | `slack_delay` | Delay between Slack messages | `"2s"`, `"1s"`, `"500ms"` |
 | `rss_retry_count` | Failed feed retry attempts | `3`, `5`, `10` |
 | `rss_retry_delay` | Delay between retries | `"2s"`, `"5s"`, `"10s"` |
+| `rss_max_item_age` | Max age for RSS items to be posted (empty = disabled) | `""`, `"48h"`, `"72h"` |
+| `data_dir` | Directory for persistent status data (resolved to absolute path) | `"./data"`, `"/opt/bot/data"` |
+| `retry_max_attempts` | Max send retries per item before dead-letter (0 = unlimited) | `5`, `10`, `0` |
+| `retry_window` | Max time to retry failed sends (0 = unlimited) | `"24h"`, `"48h"`, `"0"` |
 
 **Webhook Configuration:**
 
@@ -112,6 +153,62 @@ To create Slack webhooks:
 - `rss` - General cybersecurity RSS feeds
 - `government` - Government agency alerts (CISA, NCSC, etc.)
 - Each webhook can be independently enabled/disabled
+- Each webhook supports optional `filters` for include/exclude rules (see below)
+- Each webhook supports optional `quiet_hours` to pause delivery during specific time windows
+
+### Per-Webhook Filters
+
+Filters allow you to control which entries are sent to each webhook. All filter groups are AND-combined; values within a group are OR-combined. Omitting `filters` means all entries are accepted.
+
+```json
+{
+  "enabled": true,
+  "url": "https://discord.com/api/webhooks/...",
+  "filters": {
+    "include_countries": ["US", "DE", "GB"],
+    "exclude_groups": ["lockbit"],
+    "include_keywords": ["critical", "healthcare"],
+    "keyword_match": "literal"
+  }
+}
+```
+
+| Filter Field | Description |
+| --- | --- |
+| `include_groups` / `exclude_groups` | Filter by ransomware group name |
+| `include_countries` / `exclude_countries` | Filter by 2-letter country code |
+| `include_activities` / `exclude_activities` | Filter by activity type |
+| `include_keywords` / `exclude_keywords` | Filter by keyword in title/description |
+| `include_categories` / `exclude_categories` | Filter by RSS category (RSS only) |
+| `keyword_match` | `"literal"` (default, case-insensitive) or `"regex"` |
+
+### Quiet Hours
+
+Quiet hours pause message delivery during a configurable time window per webhook. Messages are not lost — they remain unsent and are automatically delivered when the window ends.
+
+```json
+{
+  "enabled": true,
+  "url": "https://discord.com/api/webhooks/...",
+  "quiet_hours": {
+    "enabled": true,
+    "start": "10pm",
+    "end": "7am",
+    "timezone": "Europe/Berlin"
+  }
+}
+```
+
+| Field | Description | Examples |
+| --- | --- | --- |
+| `enabled` | Toggle quiet hours on/off without removing config | `true`, `false` |
+| `start` | Window start (inclusive) — 24h or 12h format | `"22:00"`, `"10pm"`, `"10:30 PM"` |
+| `end` | Window end (exclusive) — 24h or 12h format | `"07:00"`, `"7am"`, `"6:30 AM"` |
+| `timezone` | IANA timezone (default: `"UTC"`) | `"Europe/Berlin"`, `"America/New_York"` |
+
+- Formats are mixable: `"start": "22:00", "end": "7am"` works
+- Midnight-crossing windows work: `"start": "10pm", "end": "7am"`
+- Quiet hours are hot-reloadable (changes take effect within 60 seconds)
 
 ### 2. RSS Feeds Configuration (configs/config_feeds.json)
 
@@ -189,6 +286,8 @@ To create Slack webhooks:
 **Formatting Options:**
 
 - `show_unicode_flags` - Display country flag emojis (🇺🇸, 🇩🇪, etc.)
+- `show_empty_fields` - Include fields with no data in messages (default: `true`)
+- `empty_field_text` - Placeholder text for empty fields (default: `"N/A"`)
 - `field_order` - Field order for Discord messages
 - `slack.title_text` - Custom title for Slack ransomware alerts
 - `slack.rss_text` - Custom title for Slack RSS updates
@@ -210,6 +309,24 @@ To create Slack webhooks:
 - `description` - Attack details
 - `screenshot` - Ransom note screenshot
 - `published` - Publication timestamp
+
+## 🔄 Config Hot-Reload
+
+The bot automatically checks for config file changes every 60 seconds. When a change is detected, the config is reloaded and validated without restarting the bot.
+
+**Reloadable at runtime:**
+- Poll intervals (`api_poll_interval`, `rss_poll_interval`)
+- Delays (`discord_delay`, `slack_delay`)
+- Log level (`log_level`)
+- RSS settings (`rss_retry_count`, `rss_retry_delay`, `rss_worker_timeout`, `rss_max_item_age`, `max_rss_workers`)
+- Feed URLs and webhook enabled/disabled flags
+- Webhook filters and quiet hours
+- Format configuration
+
+**Require restart:**
+- `data_dir`, `api_key`, `log_rotation`
+
+If a reloaded config fails validation, the current config remains active and the error is logged.
 
 ## 📦 Docker Compatibility
 
@@ -235,7 +352,7 @@ docker-compose up -d --build
 
 ### Required Volume Mounts
 
-- **Configuration**: `/app/config` - Mount your config directory here
+- **Configuration**: `/app/configs` - Mount your config directory here
 - **Logs**: `/app/logs` - Application logs with rotation
 - **Data**: `/app/data` - **Critical for persistence** (status tracking/deduplication)
 
@@ -246,7 +363,7 @@ docker-compose up -d --build
 Both Discord and Slack are fully supported with the same ransomware data. The only difference:
 
 - **Discord**: Supports emoji in messages (including country flags 🇺🇸🇩🇪)
-- **Slack**: Uses Block Kit formatting without emoji support
+- **Slack**: Uses Block Kit formatting with country flag emoji support (when `show_unicode_flags` is enabled)
 
 Both platforms:
 
