@@ -19,11 +19,11 @@ import (
 
 // CustomTime handles the API's inconsistent time formats
 //
-// The ransomware.live API returns timestamps in two possible formats:
+// The ransomware.live API returns timestamps in multiple formats:
 // - With microseconds: "2025-08-02 12:52:04.158280"
 // - Without microseconds: "2025-08-02 12:52:04"
-//
-// This custom unmarshaler handles both formats gracefully.
+// - RFC3339 with sub-seconds: "2026-05-14T11:54:55.383096+00:00"
+// - RFC3339: "2026-05-14T11:54:55+00:00"
 type CustomTime struct {
 	time.Time
 }
@@ -42,7 +42,15 @@ func (ct *CustomTime) UnmarshalJSON(b []byte) error {
 		// Fallback to format without microseconds: "2025-08-02 12:52:04"
 		t, err = time.Parse("2006-01-02 15:04:05", s)
 		if err != nil {
-			return err
+			// Fallback to RFC3339 with sub-seconds: "2026-05-14T11:54:55.383096+00:00"
+			t, err = time.Parse(time.RFC3339Nano, s)
+			if err != nil {
+				// Fallback to plain RFC3339: "2026-05-14T11:54:55+00:00"
+				t, err = time.Parse(time.RFC3339, s)
+				if err != nil {
+					return err
+				}
+			}
 		}
 	}
 	ct.Time = t
