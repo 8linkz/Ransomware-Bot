@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/bwmarrin/discordgo v0.29.0
 	github.com/mmcdole/gofeed v1.3.0
-	github.com/sirupsen/logrus v1.9.4
+	github.com/sirupsen/logrus v1.10.1
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 )
 
